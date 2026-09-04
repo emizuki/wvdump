@@ -46,12 +46,12 @@ def ensure_frida_server(dev, version: str = "17.17.0") -> None:
     from wvdump.adb import device_abi, ensure_root
     ensure_root(dev)
     abi = device_abi(dev)
-    if _REMOTE.split("/")[-1] in dev.shell("ps -A"):
+    if "frida-server" in dev.shell("ps -A"):
         return
     local = _download(version, abi, Path.home() / ".cache" / "wvdump")
     dev.sync.push(str(local), _REMOTE)
     dev.shell(f"chmod 755 {_REMOTE}")
     dev.shell(f"setsid {_REMOTE} >/dev/null 2>&1 < /dev/null &")
     time.sleep(2)
-    if _REMOTE.split("/")[-1] not in dev.shell("ps -A"):
+    if "frida-server" not in dev.shell("ps -A"):
         raise FridaError("frida-server did not start")
