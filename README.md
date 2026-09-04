@@ -24,6 +24,24 @@ uv run wvdump --help
 Requires Python 3.11+ (managed by `uv`) and a Frida **17.17.0** Python client
 (pinned in `pyproject.toml`, installed automatically by `uv sync`).
 
+### Building the Frida agent (optional)
+
+The Frida agent is committed pre-built at `wvdump/agent/agent.js`, so most
+users need **no** JavaScript toolchain — `uv sync` is enough. The agent is
+built from `wvdump/agent/agent.src.js`, which bundles `frida-java-bridge`
+(Frida 17 no longer exposes `Java` as an implicit global, so the bridge must
+be compiled in for the Java-layer capture hooks to work). Rebuild it only if
+you edit `agent.src.js`:
+
+```bash
+npm ci            # installs frida-compile + frida-java-bridge (dev-only)
+npm run build:agent
+```
+
+This requires Node.js (tested with Node 24) and regenerates
+`wvdump/agent/agent.js`. It is a dev-only build step; the Python package does
+not depend on Node at runtime.
+
 ## Usage
 
 All subcommands accept `--serial <SERIAL>` to select a device when more than
@@ -102,8 +120,10 @@ On the environment above:
   (`license_request.bin`, `device_rsa_key.bin`, `device_token.bin`). On this
   emulator a usable `device.wvd` is **not** produced, and `wvdump` degrades
   gracefully by saving those raw artifacts instead — see Limitations below.
-- **`capture`** — runs, and degrades gracefully for the same underlying
-  reason — see Limitations below.
+- **`capture`** — runs; the Java bridge now loads on Frida 17 (verified
+  live), so `hookJava` installs the MediaDrm/HTTP hooks rather than no-opping.
+  Whether it captures a full template depends on the target app — see
+  Limitations below.
 
 ## Limitations
 
@@ -118,13 +138,21 @@ assembling a full keybox from `device_id` + `device_key` + `device_token`, or
 extracting the plaintext RSA key. On a keybox-only device, `wvdump` saves the
 raw captured artifacts instead of a `.wvd`.
 
-**`capture` on Frida 17.** Frida 17 no longer exposes the `Java` bridge in a
-plain agent script's global scope, so the Java-layer hooks that capture the
-PSSH, license URL, and headers do not install — `hookJava` no-ops with a log
-line instead of throwing. Capturing a usable template (and therefore offline
-content-key retrieval via `keys`) requires bundling `frida-java-bridge` via
-`frida-compile`, which is a build step not yet part of this project. The
-native `device` path is unaffected by this limitation.
+**`capture` and Frida 17's Java bridge.** Frida 17 no longer exposes the
+`Java` bridge in a plain agent script's global scope. This is handled by
+compiling the agent from `agent.src.js` with `frida-java-bridge` bundled in
+(see *Building the Frida agent* above); the committed `agent.js` already
+contains it, so `hookJava` installs the PSSH / license-URL / header hooks
+normally. Verified live on the tested emulator: the compiled agent loads on
+Frida 17 with no RPC exception and `Java.available` is true inside app
+processes. The agent hooks three HTTP paths — OkHttp (`Request$Builder`),
+`java.net.HttpURLConnection`, and media3/ExoPlayer's `HttpMediaDrmCallback` —
+so it covers players that POST the license request through any of them.
+
+Whether `capture` then yields a full replayable template still depends on the
+target app: it must actually drive a license exchange through one of those
+paths while attached, and offline `keys` replay additionally needs a usable
+`.wvd`, which is subject to the keybox limitation above.
 
 ## Credits
 

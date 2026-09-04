@@ -1,0 +1,13 @@
+{
+  "name": "wvdump-agent-build",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only build tooling for the wvdump Frida agent. Not a runtime dependency of the Python package; it exists solely to bundle frida-java-bridge into wvdump/agent/agent.js, which Frida 17 no longer exposes as an implicit Java global.",
+  "scripts": {
+    "build:agent": "frida-compile wvdump/agent/agent.src.js -o wvdump/agent/agent.js -c"
+  },
+  "devDependencies": {
+    "frida-compile": "19.0.5",
+    "frida-java-bridge": "7.0.13"
+  }
+}

@@ -4,3 +4,4 @@ __pycache__/
 out/
 *.wvd
 dist/
+node_modules/
