@@ -38,8 +38,13 @@ def _cmd_capture(args) -> int:
     from wvdump.pipeline import run_capture
     dev = pick_device(args.serial)
     ensure_frida_server(dev)
-    run_capture(dev, args.package, args.out, timeout=args.timeout)
-    print(f"wrote {args.out}")
+    result = run_capture(dev, args.package, args.out, timeout=args.timeout)
+    # run_capture returns None (and writes nothing) when the capture never
+    # completed -- e.g. the Frida Java bridge is unavailable -- and already
+    # logs an actionable message in that case, so only claim success here
+    # when a file was actually written.
+    if result is not None:
+        print(f"wrote {args.out}")
     return 0
 
 

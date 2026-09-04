@@ -1,9 +1,10 @@
+import argparse
 import base64
 import json
 
 from pywidevine.license_protocol_pb2 import ClientIdentification
 
-from wvdump import pipeline
+from wvdump import adb, cli, fridaserver, pipeline
 from wvdump.models import ContentKey, CaptureTemplate
 
 def test_run_keys_writes_keys_json(tmp_path, monkeypatch):
@@ -102,3 +103,35 @@ def test_run_capture_returns_cleanly_when_never_ready(tmp_path, monkeypatch):
 
     assert result is None
     assert not out.exists()
+
+
+def _capture_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        serial=None, package="com.example.app", out="out/capture.json", timeout=15.0
+    )
+
+
+def test_cmd_capture_does_not_claim_wrote_on_incomplete_capture(monkeypatch, capsys):
+    """Reproduces the whole-branch-review finding: run_capture returning
+    None (nothing written) must not be followed by a false 'wrote ...' line."""
+    monkeypatch.setattr(adb, "pick_device", lambda serial: _FakeDevice())
+    monkeypatch.setattr(fridaserver, "ensure_frida_server", lambda dev: None)
+    monkeypatch.setattr(pipeline, "run_capture", lambda dev, package, out, timeout=15.0: None)
+
+    rc = cli._cmd_capture(_capture_args())
+
+    assert rc == 0
+    assert "wrote" not in capsys.readouterr().out
+
+
+def test_cmd_capture_reports_wrote_on_success(monkeypatch, capsys):
+    monkeypatch.setattr(adb, "pick_device", lambda serial: _FakeDevice())
+    monkeypatch.setattr(fridaserver, "ensure_frida_server", lambda dev: None)
+    monkeypatch.setattr(
+        pipeline, "run_capture", lambda dev, package, out, timeout=15.0: out
+    )
+
+    rc = cli._cmd_capture(_capture_args())
+
+    assert rc == 0
+    assert "wrote out/capture.json" in capsys.readouterr().out
