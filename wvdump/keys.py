@@ -35,7 +35,11 @@ def fetch_keys(
         cdm.parse_license(session_id, resp.content)
         keys = []
         for k in cdm.get_keys(session_id):
-            if getattr(k, "type", None) == "SIGNING":
+            # Only content-decryption keys are useful here. Whitelist CONTENT
+            # rather than merely excluding SIGNING, so operator/session and
+            # key-control entries (OPERATOR_SESSION, KEY_CONTROL, ...) don't
+            # leak into the output as if they were content keys.
+            if getattr(k, "type", None) != "CONTENT":
                 continue
             keys.append(ContentKey(kid=k.kid.hex, key=k.key.hex(), type=k.type))
         return keys

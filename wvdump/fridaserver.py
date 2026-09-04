@@ -52,6 +52,11 @@ def ensure_frida_server(dev, version: str = "17.17.0") -> None:
     dev.sync.push(str(local), _REMOTE)
     dev.shell(f"chmod 755 {_REMOTE}")
     dev.shell(f"setsid {_REMOTE} >/dev/null 2>&1 < /dev/null &")
-    time.sleep(2)
-    if "frida-server" not in dev.shell("ps -A"):
-        raise FridaError("frida-server did not start")
+    # Poll rather than waiting a single fixed interval: on a freshly booted
+    # emulator the server can take several seconds to come up under boot-time
+    # CPU contention, and a 2s wait spuriously reports "did not start".
+    for _ in range(20):
+        time.sleep(0.5)
+        if "frida-server" in dev.shell("ps -A"):
+            return
+    raise FridaError("frida-server did not start")

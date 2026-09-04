@@ -23,24 +23,40 @@ from wvdump.models import CaptureTemplate, ContentKey, DeviceIdentity
 from wvdump.session import WidevineSession
 
 
-def run_keys(wvd_path: str, capture_path: str, out_path: str) -> list[ContentKey]:
-    """Load a .wvd device file and a captured license-request template,
-    fetch content keys via capture-and-replay, and write them to out_path.
+def run_keys_from_template(wvd_path: str, template: CaptureTemplate, out_path: str) -> list[ContentKey]:
+    """Fetch content keys for an already-built template and write them out.
 
     `fetch_keys` is imported into this module's namespace so tests can
     monkeypatch `pipeline.fetch_keys` without touching wvdump.keys.
     """
     wvd = Path(wvd_path).read_bytes()
-    tmpl = CaptureTemplate.from_dict(json.loads(Path(capture_path).read_text()))
-    keys = fetch_keys(wvd, tmpl)
-    Path(out_path).write_text(json.dumps([k.__dict__ for k in keys], indent=2))
+    keys = fetch_keys(wvd, template)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps([k.__dict__ for k in keys], indent=2))
     return keys
 
 
-def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
+def run_keys(wvd_path: str, capture_path: str, out_path: str) -> list[ContentKey]:
+    """Load a .wvd device file and a captured license-request template,
+    fetch content keys via capture-and-replay, and write them to out_path."""
+    tmpl = CaptureTemplate.from_dict(json.loads(Path(capture_path).read_text()))
+    return run_keys_from_template(wvd_path, tmpl, out_path)
+
+
+def run_device(dev, out_dir: str, timeout: float = 10.0, reprovision: bool = False) -> str:
     """Attach the agent's native identity hooks to every DRM HAL process on
     `dev`, collect a device identity for up to `timeout` seconds, and save
     it under `out_dir`.
+
+    With `reprovision=True`, first force a fresh Widevine provision (wipe the
+    cached credentials and restart the HAL) and additionally install the
+    provisioning-time plaintext-RSA-key sniff. This is what makes a usable
+    `.wvd` obtainable on a keybox-provisioned emulator: the plaintext device
+    RSA key is only materialized while a certificate is being provisioned, so
+    the operator must play protected content *after* this starts to drive a
+    fresh provision + license request. Without it, only the wrapped
+    (non-importable) key is seen and the keybox-only fallback below applies.
 
     This never raises for an incomplete/unusable capture -- Widevine L3
     provisioning varies across devices (e.g. some only ever expose a wrapped,
@@ -52,17 +68,33 @@ def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if reprovision:
+        from wvdump.adb import reprovision_widevine
+        services = reprovision_widevine(dev)
+        print(
+            f"[wvdump] forced a fresh Widevine provision (restarted {services}); "
+            "play protected content now so the CDM re-provisions and the "
+            "plaintext device key is captured."
+        )
     # NOTE: "client_id" here holds the raw buffer captured at PrepareKeyRequest,
     # which is the Widevine LICENSE REQUEST (or its SignedMessage wrapper), not
     # a bare ClientIdentification -- extract_client_id() recovers the nested
-    # ClientIdentification from it below.
-    state: dict[str, bytes | None] = {"client_id": None, "rsa_key": None, "keybox": None}
+    # ClientIdentification from it below. "rsa_plaintext" records whether the
+    # captured rsa_key is the importable plaintext key (from the provisioning
+    # sniff) or the wrapped key from LoadDeviceRSAKey.
+    state: dict = {"client_id": None, "rsa_key": None, "keybox": None, "rsa_plaintext": False}
 
     def on_client_id(payload, data):
         state["client_id"] = b64decode(payload["data"])
 
     def on_rsa_key(payload, data):
+        # Prefer the plaintext key: let it overwrite a previously-seen wrapped
+        # key, but never let a later wrapped key clobber a captured plaintext.
+        plaintext = bool(payload.get("plaintext"))
+        if state["rsa_key"] is not None and state["rsa_plaintext"] and not plaintext:
+            return
         state["rsa_key"] = b64decode(payload["data"])
+        state["rsa_plaintext"] = plaintext
 
     def on_keybox(payload, data):
         if state["keybox"] is None:  # keep the first one captured
@@ -77,7 +109,18 @@ def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     session.on("keybox", on_keybox)
     session.on("log", on_log)
     session.attach_all(invoke="hookNative")
-    session.run(timeout=timeout, until=lambda: state["client_id"] and state["rsa_key"])
+    if reprovision:
+        session.invoke("hookProvisioningKey")
+        # Only the plaintext key yields a usable .wvd, so wait for that
+        # specifically rather than stopping at the wrapped key.
+        done = lambda: state["client_id"] and state["rsa_key"] and state["rsa_plaintext"]
+    else:
+        # Stop as soon as we have a full identity OR a keybox: on a
+        # keybox-only device the keybox is the best available result, so
+        # there is no point waiting out the whole timeout for a .wvd that
+        # will never come.
+        done = lambda: (state["client_id"] and state["rsa_key"]) or state["keybox"]
+    session.run(timeout=timeout, until=done)
 
     if state["client_id"] is not None:
         # Saved unconditionally for debugging, even if extraction/build below fails.

@@ -24,6 +24,24 @@ uv run wvdump --help
 Requires Python 3.11+ (managed by `uv`) and a Frida **17.17.0** Python client
 (pinned in `pyproject.toml`, installed automatically by `uv sync`).
 
+### Building the Frida agent (optional)
+
+The Frida agent is committed pre-built at `wvdump/agent/agent.js`, so most
+users need **no** JavaScript toolchain — `uv sync` is enough. The agent is
+built from `wvdump/agent/agent.src.js`, which bundles `frida-java-bridge`
+(Frida 17 no longer exposes `Java` as an implicit global, so the bridge must
+be compiled in for the Java-layer capture hooks to work). Rebuild it only if
+you edit `agent.src.js`:
+
+```bash
+npm ci            # installs frida-compile + frida-java-bridge (dev-only)
+npm run build:agent
+```
+
+This requires Node.js (tested with Node 24) and regenerates
+`wvdump/agent/agent.js`. It is a dev-only build step; the Python package does
+not depend on Node at runtime.
+
 ## Usage
 
 All subcommands accept `--serial <SERIAL>` to select a device when more than
@@ -32,7 +50,9 @@ one is attached, and the `device`/`capture` commands accept `--timeout
 
 ### `doctor`
 
-Sanity-checks that adb sees the device and reports its serial and ABI:
+Sanity-checks the setup and reports the device serial and ABI, whether adb is
+root, and whether `frida-server` is running (all read-only — it does not call
+`adb root` or start anything):
 
 ```bash
 uv run wvdump doctor
@@ -50,6 +70,23 @@ uv run wvdump device --out out
 Trigger some DRM playback on the device while this runs so the native
 OEMCrypto hooks fire.
 
+On a **keybox-provisioned** device (the emulator below), the device RSA key
+seen during normal playback is wrapped and cannot be imported, so plain
+`device` falls back to raw artifacts. To get a **usable `.wvd`**, add
+`--reprovision`:
+
+```bash
+uv run wvdump device --reprovision --out out
+```
+
+This wipes the cached Widevine credentials and restarts the DRM HAL so the
+CDM provisions a fresh device certificate; the plaintext device RSA key is
+only exposed during that provisioning. **Play protected content while it
+runs** (e.g. the media3 demo against the public Widevine UAT test stream) so
+the CDM re-provisions and issues a license request. All apps re-provision
+automatically afterwards, so the effect is transient but disruptive — hence
+it is opt-in. See *Producing a usable `.wvd`* below.
+
 ### `capture`
 
 Attaches to a given app and records a PSSH + license-request template (URL,
@@ -61,11 +98,19 @@ uv run wvdump capture --package <PKG> --out out/capture.json
 
 ### `keys`
 
-Replays a captured license request against the license server using a
-previously captured device identity, printing `KID:key` pairs:
+Replays a license request against the license server using a previously
+captured device identity, printing `KID:key` pairs. Supply the request
+template either from a `capture.json` or directly on the command line:
 
 ```bash
+# from a captured template
 uv run wvdump keys --wvd out/device.wvd --capture out/capture.json --out out/keys.json
+
+# or supply the PSSH + URL (+ optional headers) directly
+uv run wvdump keys --wvd out/device.wvd \
+  --pssh <BASE64_PSSH> \
+  --url "https://proxy.uat.widevine.com/proxy?provider=widevine_test" \
+  --header "Authorization: Bearer <token>"
 ```
 
 ### `auto`
@@ -75,6 +120,22 @@ Runs `device` + `capture` + `keys` end-to-end against a single app:
 ```bash
 uv run wvdump auto --package <PKG> --out out
 ```
+
+### Output layout
+
+The device-scoped commands (`device`, `capture`, `auto`) write under a
+per-device subdirectory so multiple devices don't collide:
+
+```
+out/<serial>/
+  device.wvd
+  keybox.json      # only when a keybox is exposed
+  capture.json     # {pssh, url, headers}
+  keys.json        # [{kid, key, type}]
+```
+
+Passing an explicit `--out` to `capture` overrides that path verbatim.
+Content keys are also printed as `KID:key` lines.
 
 ## Enabling adb root
 
@@ -98,33 +159,63 @@ On the environment above:
 - **`doctor`** — works: reports the device serial and ABI.
 - **`device`** — works: the native OEMCrypto hooks
   (`OEMCrypto_GetKeyData`, `OEMCrypto_LoadDeviceRSAKey`, `PrepareKeyRequest`)
-  fire during DRM playback, and `wvdump` saves the raw artifacts
-  (`license_request.bin`, `device_rsa_key.bin`, `device_token.bin`). On this
-  emulator a usable `device.wvd` is **not** produced, and `wvdump` degrades
-  gracefully by saving those raw artifacts instead — see Limitations below.
-- **`capture`** — runs, and degrades gracefully for the same underlying
-  reason — see Limitations below.
+  fire during DRM playback. Plain `device` sees only the wrapped RSA key and
+  saves raw artifacts.
+- **`device --reprovision`** — works: forcing a fresh provision captures the
+  **plaintext** device RSA key and a matching `ClientIdentification`, and
+  `wvdump` writes a real `device.wvd` (verified: a 2048-bit key, ~3 KB
+  `.wvd`).
+- **`keys`** — works: the produced `device.wvd`, replayed against the public
+  Widevine UAT test proxy for the wvmedia test stream, returned **8 content
+  keys** (`KID:key`). This is the full "identity + keys, on the emulator"
+  path.
+- **`capture`** — runs; the Java bridge now loads on Frida 17 (verified
+  live), so `hookJava` installs the MediaDrm/HTTP hooks rather than no-opping.
+  Whether it captures a full template depends on the target app — see
+  Limitations below.
+
+## Producing a usable `.wvd`
+
+This emulator provisions Widevine via a **keybox** (system_id 7283, the public
+AOSP test keybox), not a baked-in RSA device certificate. During normal
+playback the RSA key handed to `LoadDeviceRSAKey` is the device's
+**wrapped/encrypted** key, which `RSA.importKey` rejects — so it never yields
+a `.wvd` on its own.
+
+The plaintext device RSA key is materialized only briefly, inside an
+obfuscated OEMCrypto function, **while a device certificate is being
+provisioned**. `wvdump device --reprovision` exploits this: it wipes the
+cached credentials, restarts the DRM HAL so the CDM re-provisions, and sniffs
+every obfuscated / ordinal OEMCrypto export's arguments for a DER-encoded
+RSA-2048 private key (`0x30 0x82 …`). On the tested emulator the key surfaced
+as `ncmqbmbc#arg5` during `HandleProvisioningResponse`; combined with the
+`ClientIdentification` from `PrepareKeyRequest` it produces a valid `.wvd`
+that fetches content keys. This generalizes the reference dumper's
+`polorucp` sniff instead of hard-coding one obfuscated symbol name.
+
+Caveats: the exact obfuscated function/argument is **build-specific** — the
+sniff scans broadly so it should adapt, but on a very different OEMCrypto
+build the plaintext may not surface this way (Google changed OEMCrypto on
+Android 11+). It also needs a rooted device (to wipe the credential store and
+restart the HAL) and a live playback to drive provisioning.
 
 ## Limitations
 
-**`.wvd` on keybox-provisioned devices.** This emulator provisions Widevine
-via a **keybox**, not an RSA device certificate. The device token it exposes
-is 72 bytes (not a full ≥128-byte keybox), and the RSA key returned by
-`LoadDeviceRSAKey` is the device's **wrapped/encrypted** key rather than an
-importable PEM/DER key, so `RSA.importKey` rejects it. Producing a usable
-`.wvd` therefore requires either a device that provisions a real RSA device
-certificate (typically a physical phone) or additional agent hooks — e.g.
-assembling a full keybox from `device_id` + `device_key` + `device_token`, or
-extracting the plaintext RSA key. On a keybox-only device, `wvdump` saves the
-raw captured artifacts instead of a `.wvd`.
+**`capture` and Frida 17's Java bridge.** Frida 17 no longer exposes the
+`Java` bridge in a plain agent script's global scope. This is handled by
+compiling the agent from `agent.src.js` with `frida-java-bridge` bundled in
+(see *Building the Frida agent* above); the committed `agent.js` already
+contains it, so `hookJava` installs the PSSH / license-URL / header hooks
+normally. Verified live on the tested emulator: the compiled agent loads on
+Frida 17 with no RPC exception and `Java.available` is true inside app
+processes. The agent hooks three HTTP paths — OkHttp (`Request$Builder`),
+`java.net.HttpURLConnection`, and media3/ExoPlayer's `HttpMediaDrmCallback` —
+so it covers players that POST the license request through any of them.
 
-**`capture` on Frida 17.** Frida 17 no longer exposes the `Java` bridge in a
-plain agent script's global scope, so the Java-layer hooks that capture the
-PSSH, license URL, and headers do not install — `hookJava` no-ops with a log
-line instead of throwing. Capturing a usable template (and therefore offline
-content-key retrieval via `keys`) requires bundling `frida-java-bridge` via
-`frida-compile`, which is a build step not yet part of this project. The
-native `device` path is unaffected by this limitation.
+Whether `capture` then yields a full replayable template still depends on the
+target app: it must actually drive a license exchange through one of those
+paths while attached, and offline `keys` replay additionally needs a usable
+`.wvd`, which is subject to the keybox limitation above.
 
 ## Credits
 

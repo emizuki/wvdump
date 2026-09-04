@@ -135,3 +135,38 @@ def test_cmd_capture_reports_wrote_on_success(monkeypatch, capsys):
 
     assert rc == 0
     assert "wrote out/capture.json" in capsys.readouterr().out
+
+
+def _keys_args(**kw) -> argparse.Namespace:
+    base = dict(wvd="d.wvd", capture=None, pssh=None, url=None, header=None, out="out/keys.json")
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_cmd_keys_direct_input_builds_template(monkeypatch, capsys):
+    captured = {}
+
+    def fake(wvd_path, template, out_path):
+        captured["template"] = template
+        return [ContentKey("dd", "04", "CONTENT")]
+
+    monkeypatch.setattr(pipeline, "run_keys_from_template", fake)
+    rc = cli._cmd_keys(_keys_args(pssh="AAAA", url="https://lic",
+                                  header=["Authorization: Bearer x"]))
+
+    assert rc == 0
+    tmpl = captured["template"]
+    assert (tmpl.pssh, tmpl.url) == ("AAAA", "https://lic")
+    assert tmpl.headers == {"Authorization": "Bearer x"}
+    assert "dd:04" in capsys.readouterr().out
+
+
+def test_cmd_keys_requires_capture_or_pssh_url(capsys):
+    rc = cli._cmd_keys(_keys_args())  # neither --capture nor --pssh/--url
+    assert rc == 2
+    assert "provide --capture" in capsys.readouterr().err
+
+
+def test_device_out_dir_sanitizes_serial():
+    assert cli._device_out_dir("out", "emulator-5554") == "out/emulator-5554"
+    assert cli._device_out_dir("out", "192.168.0.5:5555") == "out/192.168.0.5_5555"

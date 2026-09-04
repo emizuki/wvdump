@@ -14,7 +14,9 @@ dependencies = [
 wvdump = "wvdump.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+# pycryptodome is pulled in transitively by pywidevine, but the tests import
+# Crypto.PublicKey.RSA directly, so declare it explicitly for the test env.
+dev = ["pytest>=8", "pycryptodome>=3.20"]
 
 [build-system]
 requires = ["hatchling"]

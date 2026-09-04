@@ -26,6 +26,20 @@ def test_build_wvd_roundtrips_through_pywidevine():
     assert dev.client_id is not None
 
 
+def test_build_wvd_accepts_a_der_private_key():
+    # The provisioning-time capture yields a DER-encoded key, not PEM;
+    # build_wvd must normalize it rather than reject it.
+    key = RSA.generate(2048)
+    der = key.export_key("DER")
+    cid = ClientIdentification()
+    cid.type = ClientIdentification.TokenType.DRM_DEVICE_CERTIFICATE
+    identity = DeviceIdentity(client_id=cid.SerializeToString(), private_key=der, system_id=7283)
+
+    wvd = build_wvd(identity)         # must not raise on DER input
+    dev = Device.loads(wvd)
+    assert dev.private_key is not None
+
+
 def _client_id() -> ClientIdentification:
     cid = ClientIdentification()
     cid.type = ClientIdentification.TokenType.DRM_DEVICE_CERTIFICATE

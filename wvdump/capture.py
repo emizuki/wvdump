@@ -38,5 +38,6 @@ class CaptureCollector:
 
 def save_capture(template: CaptureTemplate, path: str | Path) -> Path:
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(template.to_dict(), indent=2))
     return path
