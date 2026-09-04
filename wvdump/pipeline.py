@@ -188,12 +188,14 @@ def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> Capt
         print(f"[agent] {payload.get('message', '')}")
 
     session = WidevineSession(AGENT_SOURCE, device_name=dev.serial)
-    for kind in ("pssh", "license_url", "license_headers"):
+    for kind in ("pssh", "license_request", "license_url", "license_headers"):
         session.on(kind, lambda payload, data: collector.feed(payload))
     session.on("log", on_log)
 
     try:
         session.attach_app(package, invoke="hookJava")
+        # Wait for a correlated license POST (collector.ready), not merely any
+        # url/headers -- otherwise we'd stop at the first unrelated request.
         session.run(timeout=timeout, until=lambda: collector.ready)
     except (frida.RPCException, FridaError) as exc:
         print(
@@ -202,13 +204,21 @@ def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> Capt
         )
         return None
 
-    if not collector.ready:
+    if not collector.has_template:
         print(
-            "capture incomplete: did not observe a full pssh + license URL + "
-            "headers within the timeout; no capture.json written -- see "
-            "README Limitations"
+            "capture incomplete: did not observe a pssh plus a license request "
+            "within the timeout; no capture.json written -- see README "
+            "Limitations"
         )
         return None
+
+    if not collector.correlated:
+        print(
+            "[wvdump] warning: could not correlate the license POST to the "
+            "MediaDrm challenge; falling back to the last-seen OkHttp URL, "
+            "which may not be the real license endpoint. Re-run and start "
+            "playback while attached, or supply --pssh/--url to `keys` directly."
+        )
 
     template = collector.template()
     save_capture(template, out_path)

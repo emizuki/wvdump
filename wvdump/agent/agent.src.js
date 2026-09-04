@@ -288,24 +288,210 @@ function hookProvisioningKey() {
 
 // --- Java hooks ------------------------------------------------------------
 
+// Base64 of the last few license challenges produced by MediaDrm, used to
+// correlate the outgoing HTTP POST that actually carries the license request
+// (so we record the real license-server URL/headers, not some unrelated
+// request that merely happened to fire around the same time).
+var _recentChallenges = [];
+function _rememberChallenge(u8) {
+    if (!u8 || !u8.length) return;
+    var b64 = bytesToBase64(u8);
+    _recentChallenges.push({
+        u8: u8,
+        b64: b64,                                                    // standard base64
+        b64url: b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),  // url-safe, unpadded
+    });
+    if (_recentChallenges.length > 6) _recentChallenges.shift();
+}
+
+// Latin-1 view of a byte array, for substring searches against text bodies.
+function _latin1(u8) {
+    var s = '', CHUNK = 0x8000;
+    for (var i = 0; i < u8.length; i += CHUNK) {
+        s += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+    }
+    return s;
+}
+
+// Does `hay` contain the byte subsequence `needle`?
+function _bytesContain(hay, needle) {
+    if (needle.length === 0 || needle.length > hay.length) return false;
+    var last = hay.length - needle.length;
+    for (var i = 0; i <= last; i++) {
+        var j = 0;
+        while (j < needle.length && hay[i + j] === needle[j]) j++;
+        if (j === needle.length) return true;
+    }
+    return false;
+}
+
+// A POST body "is" the license request if it equals a recent challenge, or
+// embeds it -- as raw bytes, or as base64 (standard or url-safe). The last
+// two matter because some apps wrap the challenge (base64) inside a
+// JSON request body rather than POSTing it raw.
+function _bodyCarriesChallenge(bodyU8) {
+    var bodyB64 = bytesToBase64(bodyU8);
+    var bodyText = null;
+    for (var i = 0; i < _recentChallenges.length; i++) {
+        var c = _recentChallenges[i];
+        if (bodyB64 === c.b64) return true;
+        if (_bytesContain(bodyU8, c.u8)) return true;
+        if (bodyText === null) bodyText = _latin1(bodyU8);
+        if (bodyText.indexOf(c.b64) !== -1) return true;
+        if (bodyText.indexOf(c.b64url) !== -1) return true;
+    }
+    return false;
+}
+
 // PSSH: android.media.MediaDrm.getKeyRequest exposes the init data the app
 // asks a license for. This is framework-level, so it fires regardless of
-// which HTTP client the app uses.
+// which HTTP client the app uses. The returned KeyRequest's getData() is the
+// challenge the app is about to POST -- remember it for correlation.
 function hookMediaDrm() {
     try {
         var MediaDrm = Java.use("android.media.MediaDrm");
         MediaDrm.getKeyRequest.overload("[B", "[B", "java.lang.String", "int", "java.util.HashMap")
             .implementation = function (scope, initData, mime, keyType, params) {
                 if (initData) emit("pssh", { data: bytesToBase64(initData) });
-                return this.getKeyRequest(scope, initData, mime, keyType, params);
+                var req = this.getKeyRequest(scope, initData, mime, keyType, params);
+                try {
+                    var data = req.getData();
+                    if (data !== null) _rememberChallenge(new Uint8Array(data));
+                } catch (e) { /* correlation just won't fire for this request */ }
+                try {
+                    var durl = req.getDefaultUrl();
+                    if (durl && ("" + durl).length > 0) emit("license_url", { url: "" + durl });
+                } catch (e) { /* not all KeyRequests carry a default URL */ }
+                return req;
             };
     } catch (e) {
         emit("log", { message: "MediaDrm.getKeyRequest hook failed: " + e });
     }
 }
 
+// The authoritative URL + headers: the OkHttp POST that carries the license
+// challenge. Hooking Request.Builder.build() surfaces each fully-formed
+// request; for each POST we read the body's bytes and, if they carry a
+// challenge we saw from getKeyRequest, that request is the license request.
+// Body bytes are read by reflection (see _bodyBytesByReflection) so it works
+// even when the app's okhttp/okio method names are R8-minified, with a plain
+// okio read as a fallback for un-minified builds.
+function hookLicensePost() {
+    var Builder, Buffer;
+    try { Builder = Java.use("okhttp3.Request$Builder"); }
+    catch (e) { emit("log", { message: "licensePost: okhttp3.Request$Builder not found: " + e }); return; }
+    try { Buffer = Java.use("okio.Buffer"); }
+    catch (e) { Buffer = null; } // reflection path still works without okio
+    try {
+        Builder.build.implementation = function () {
+            var request = this.build();
+            try { _inspectRequest(request, Buffer); }
+            catch (e) { emit("log", { message: "licensePost: inspect threw: " + e }); }
+            return request;
+        };
+        emit("log", { message: "licensePost: build() hook installed" });
+    } catch (e) {
+        emit("log", { message: "licensePost: could not hook build(): " + e });
+    }
+}
+
+// okhttp Headers.toString() emits "name: value\n" per header -- parse that
+// rather than name(i)/value(i), which R8 may have minified away.
+function _extractHeaders(request) {
+    var out = {};
+    try {
+        ("" + request.headers().toString()).split("\n").forEach(function (line) {
+            var idx = line.indexOf(": ");
+            if (idx > 0) out[line.substring(0, idx)] = line.substring(idx + 2);
+        });
+    } catch (e) { /* headers unreadable -- URL alone is still useful */ }
+    return out;
+}
+
+function _emitLicense(request, via) {
+    var url = "" + request.url().toString();
+    emit("license_request", { url: url, headers: _extractHeaders(request), matched: true, via: via });
+    emit("log", { message: "correlated license POST (" + via + "): " + url });
+}
+
+// A URL that is clearly a DRM license endpoint. Used only while a challenge is
+// pending, so it discriminates the license POST (e.g. a path containing
+// "license" or a "drm_type=" query) from unrelated app POSTs (API calls,
+// analytics), which carry none of these markers.
+function _looksLikeLicenseUrl(url) {
+    var u = url.toLowerCase();
+    return u.indexOf("license") !== -1 || u.indexOf("drm_type=") !== -1 ||
+        u.indexOf("widevine") !== -1 || u.indexOf("acquirelicense") !== -1 ||
+        u.indexOf("getlicense") !== -1 || u.indexOf("licenseserver") !== -1;
+}
+
+// Read a RequestBody's content bytes by reflection: an okhttp byte-array body
+// (RequestBody.toRequestBody) captures the payload in a `byte[]` field. The
+// reflection API is framework code, never minified, so this reads the payload
+// even when okhttp/okio method names are stripped. Walks a few superclasses
+// and returns the first plausibly-sized byte[] field value.
+function _bodyBytesByReflection(body) {
+    try {
+        var cls = body.getClass();
+        for (var depth = 0; depth < 3 && cls !== null; depth++) {
+            var fields = cls.getDeclaredFields();
+            for (var i = 0; i < fields.length; i++) {
+                var f = fields[i];
+                if (("" + f.getType().getName()) !== "[B") continue;
+                try {
+                    f.setAccessible(true);
+                    var val = f.get(body);
+                    if (val !== null && val.length > 0 && val.length <= 262144) return new Uint8Array(val);
+                } catch (e) { /* skip this field */ }
+            }
+            cls = cls.getSuperclass();
+        }
+    } catch (e) { /* reflection unavailable -- fall back to okio */ }
+    return null;
+}
+
+// Best-effort okio read for the fallback path (non-minified okio only).
+function _bufferBytes(buf) {
+    try { return buf.readByteArray(); } catch (e) {}
+    try { return buf.snapshot().toByteArray(); } catch (e) {}
+    return null;
+}
+
+function _inspectRequest(request, Buffer) {
+    if (_recentChallenges.length === 0) return; // nothing to match yet
+    if (("" + request.method()).toUpperCase() !== "POST") return;
+    var body = request.body();
+    if (body === null) return;
+
+    // (1) Definitive: the POST body carries the challenge. Read the body's
+    //     bytes by reflection (minification-proof), or via okio on
+    //     un-minified builds. Works regardless of the license URL.
+    var u8 = _bodyBytesByReflection(body);
+    if (u8 === null && Buffer !== null) {
+        try {
+            if (!body.isDuplex() && !body.isOneShot()) {
+                var len = -1;
+                try { len = body.contentLength(); } catch (e) { /* unknown */ }
+                if (len <= 262144) {
+                    var buf = Buffer.$new();
+                    body.writeTo(buf);
+                    var bb = _bufferBytes(buf);
+                    if (bb !== null) u8 = new Uint8Array(bb);
+                }
+            }
+        } catch (e) { /* body unreadable -- fall through to the URL heuristic */ }
+    }
+    if (u8 !== null && _bodyCarriesChallenge(u8)) { _emitLicense(request, "body-match"); return; }
+
+    // (2) Heuristic: the body wasn't readable (a hardened app with
+    //     R8-minified okhttp/okio), but a challenge is pending and this POST
+    //     goes to an unmistakable DRM license endpoint. That is the license
+    //     request; capture its URL + headers.
+    if (_looksLikeLicenseUrl("" + request.url().toString())) { _emitLicense(request, "url-heuristic"); return; }
+}
+
 // URL + headers, client 1: OkHttp. Request.Builder captures url + headers
-// before the call is made. Apps that ship okhttp3 (e.g. Udemy) hit this.
+// before the call is made. Apps that ship okhttp3 hit this.
 function hookOkHttp() {
     try {
         var Builder = Java.use("okhttp3.Request$Builder");
@@ -406,6 +592,7 @@ function hookJava() {
     }
     Java.perform(function () {
         hookMediaDrm();
+        hookLicensePost();
         hookOkHttp();
         hookHttpURLConnection();
         hookMediaDrmCallback();

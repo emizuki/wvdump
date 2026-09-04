@@ -89,12 +89,36 @@ it is opt-in. See *Producing a usable `.wvd`* below.
 
 ### `capture`
 
-Attaches to a given app and records a PSSH + license-request template (URL,
-headers, body) while you play protected content in that app:
+Attaches to a given app and records the license-request template (PSSH +
+license-server URL + headers) while you play protected content in that app:
 
 ```bash
 uv run wvdump capture --package <PKG> --out out/capture.json
 ```
+
+To identify the *real* license request among all of the app's HTTP traffic,
+the agent remembers the challenge that `MediaDrm.getKeyRequest` produces, then
+inspects each outgoing OkHttp POST while a challenge is pending, in two tiers:
+
+1. **Body match** — read the POST body (by Java reflection, which works even
+   when the app's okhttp/okio method names are R8-minified, with a plain okio
+   read as a fallback) and check whether it carries the challenge as raw bytes
+   or embedded base64. A hit is definitive.
+2. **URL heuristic** — if the body can't be read (a hardened app), a POST to
+   an unmistakable license endpoint (URL containing `license`, `drm_type=`,
+   `widevine`, …) while a challenge is pending is taken as the license
+   request. Unrelated POSTs (GraphQL, analytics) carry none of those markers.
+
+The matched request's URL and headers are recorded authoritatively. If nothing
+can be correlated within the timeout, `capture` falls back to the last-seen
+URL/headers with a warning (pass the right endpoint to `keys` via
+`--pssh`/`--url` instead). Start playback *after* `capture` attaches so the
+license request is observed.
+
+This was verified live against a heavily R8-minified commercial player
+(okhttp 5 / okio): with a freshly-provisioned playback, `capture` correlated
+the real DRM license endpoint plus its PSSH and auth headers, rather than the
+app's unrelated API calls.
 
 ### `keys`
 
