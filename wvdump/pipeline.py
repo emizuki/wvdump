@@ -38,12 +38,16 @@ def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     `<out_dir>/keybox.json` if only a keybox arrived.
     """
     from wvdump.agent import AGENT_SOURCE
-    from wvdump.device import save_wvd
+    from wvdump.device import extract_client_id, save_wvd
     from wvdump.keybox import parse_keybox
     from wvdump.session import WidevineSession
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # NOTE: "client_id" here holds the raw buffer captured at PrepareKeyRequest,
+    # which is the Widevine LICENSE REQUEST (or its SignedMessage wrapper), not
+    # a bare ClientIdentification -- extract_client_id() recovers the nested
+    # ClientIdentification from it below.
     state: dict[str, bytes | None] = {"client_id": None, "rsa_key": None, "keybox": None}
 
     def on_client_id(payload, data):
@@ -67,10 +71,20 @@ def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     session.attach_all(invoke="hookNative")
     session.run(timeout=timeout, until=lambda: state["client_id"] and state["rsa_key"])
 
+    if state["client_id"] is not None:
+        # Saved unconditionally for debugging, even if extraction below fails.
+        (out / "license_request.bin").write_bytes(state["client_id"])
+
     if state["client_id"] and state["rsa_key"]:
-        identity = DeviceIdentity(client_id=state["client_id"], private_key=state["rsa_key"])
-        path = save_wvd(identity, out / "device.wvd")
-        return str(path)
+        try:
+            client_id = extract_client_id(state["client_id"])
+        except IncompleteIdentity:
+            client_id = None
+        if client_id is not None:
+            identity = DeviceIdentity(client_id=client_id, private_key=state["rsa_key"])
+            path = save_wvd(identity, out / "device.wvd")
+            return str(path)
+
     if state["keybox"] is not None:
         keybox = parse_keybox(state["keybox"])
         path = out / "keybox.json"
