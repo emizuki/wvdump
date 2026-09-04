@@ -50,7 +50,9 @@ one is attached, and the `device`/`capture` commands accept `--timeout
 
 ### `doctor`
 
-Sanity-checks that adb sees the device and reports its serial and ABI:
+Sanity-checks the setup and reports the device serial and ABI, whether adb is
+root, and whether `frida-server` is running (all read-only — it does not call
+`adb root` or start anything):
 
 ```bash
 uv run wvdump doctor
@@ -96,11 +98,19 @@ uv run wvdump capture --package <PKG> --out out/capture.json
 
 ### `keys`
 
-Replays a captured license request against the license server using a
-previously captured device identity, printing `KID:key` pairs:
+Replays a license request against the license server using a previously
+captured device identity, printing `KID:key` pairs. Supply the request
+template either from a `capture.json` or directly on the command line:
 
 ```bash
+# from a captured template
 uv run wvdump keys --wvd out/device.wvd --capture out/capture.json --out out/keys.json
+
+# or supply the PSSH + URL (+ optional headers) directly
+uv run wvdump keys --wvd out/device.wvd \
+  --pssh <BASE64_PSSH> \
+  --url "https://proxy.uat.widevine.com/proxy?provider=widevine_test" \
+  --header "Authorization: Bearer <token>"
 ```
 
 ### `auto`
@@ -110,6 +120,22 @@ Runs `device` + `capture` + `keys` end-to-end against a single app:
 ```bash
 uv run wvdump auto --package <PKG> --out out
 ```
+
+### Output layout
+
+The device-scoped commands (`device`, `capture`, `auto`) write under a
+per-device subdirectory so multiple devices don't collide:
+
+```
+out/<serial>/
+  device.wvd
+  keybox.json      # only when a keybox is exposed
+  capture.json     # {pssh, url, headers}
+  keys.json        # [{kid, key, type}]
+```
+
+Passing an explicit `--out` to `capture` overrides that path verbatim.
+Content keys are also printed as `KID:key` lines.
 
 ## Enabling adb root
 

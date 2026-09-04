@@ -23,18 +23,25 @@ from wvdump.models import CaptureTemplate, ContentKey, DeviceIdentity
 from wvdump.session import WidevineSession
 
 
-def run_keys(wvd_path: str, capture_path: str, out_path: str) -> list[ContentKey]:
-    """Load a .wvd device file and a captured license-request template,
-    fetch content keys via capture-and-replay, and write them to out_path.
+def run_keys_from_template(wvd_path: str, template: CaptureTemplate, out_path: str) -> list[ContentKey]:
+    """Fetch content keys for an already-built template and write them out.
 
     `fetch_keys` is imported into this module's namespace so tests can
     monkeypatch `pipeline.fetch_keys` without touching wvdump.keys.
     """
     wvd = Path(wvd_path).read_bytes()
-    tmpl = CaptureTemplate.from_dict(json.loads(Path(capture_path).read_text()))
-    keys = fetch_keys(wvd, tmpl)
-    Path(out_path).write_text(json.dumps([k.__dict__ for k in keys], indent=2))
+    keys = fetch_keys(wvd, template)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps([k.__dict__ for k in keys], indent=2))
     return keys
+
+
+def run_keys(wvd_path: str, capture_path: str, out_path: str) -> list[ContentKey]:
+    """Load a .wvd device file and a captured license-request template,
+    fetch content keys via capture-and-replay, and write them to out_path."""
+    tmpl = CaptureTemplate.from_dict(json.loads(Path(capture_path).read_text()))
+    return run_keys_from_template(wvd_path, tmpl, out_path)
 
 
 def run_device(dev, out_dir: str, timeout: float = 10.0, reprovision: bool = False) -> str:
@@ -108,7 +115,11 @@ def run_device(dev, out_dir: str, timeout: float = 10.0, reprovision: bool = Fal
         # specifically rather than stopping at the wrapped key.
         done = lambda: state["client_id"] and state["rsa_key"] and state["rsa_plaintext"]
     else:
-        done = lambda: state["client_id"] and state["rsa_key"]
+        # Stop as soon as we have a full identity OR a keybox: on a
+        # keybox-only device the keybox is the best available result, so
+        # there is no point waiting out the whole timeout for a .wvd that
+        # will never come.
+        done = lambda: (state["client_id"] and state["rsa_key"]) or state["keybox"]
     session.run(timeout=timeout, until=done)
 
     if state["client_id"] is not None:

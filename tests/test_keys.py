@@ -33,6 +33,35 @@ def test_fetch_keys_replays_to_captured_endpoint():
     assert posted["data"] == b"CHALLENGE"
     assert keys == [ContentKey(kid="eb67", key="100b", type="CONTENT")]
 
+
+class _MultiTypeCdm(_FakeCdm):
+    """Returns a mix of key types; only CONTENT should survive filtering."""
+    def get_keys(self, session_id):
+        def k(kid_hex, key_bytes, typ):
+            return type("K", (), {"kid": type("U", (), {"hex": kid_hex})(),
+                                  "key": key_bytes, "type": typ})()
+        return [
+            k("aaaa", b"\x01", "SIGNING"),
+            k("bbbb", b"\x02", "OPERATOR_SESSION"),
+            k("cccc", b"\x03", "KEY_CONTROL"),
+            k("dddd", b"\x04", "CONTENT"),
+        ]
+
+
+def test_fetch_keys_returns_only_content_keys():
+    def fake_post(url, headers, data):
+        class R:
+            status_code = 200
+            content = b"LICENSE_RESPONSE"
+            text = "ok"
+        return R()
+
+    keys = fetch_keys(b"WVD", CaptureTemplate("AAAA", "https://lic", {}),
+                      cdm_factory=lambda wvd: _MultiTypeCdm(), http_post=fake_post)
+
+    assert keys == [ContentKey(kid="dddd", key="04", type="CONTENT")]
+
+
 def test_fetch_keys_raises_on_non_200():
     def fake_post(url, headers, data):
         class R:
