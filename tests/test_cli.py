@@ -69,3 +69,36 @@ def test_run_device_falls_back_when_wvd_build_fails(tmp_path, monkeypatch):
     assert not (tmp_path / "device.wvd").exists()
     assert (tmp_path / "license_request.bin").exists()
     assert (tmp_path / "device_rsa_key.bin").read_bytes() == b"wrapped-rsa-key-bytes"
+
+
+class _FakeNeverReadySession:
+    """Stands in for WidevineSession in the capture path: attach_app is a
+    no-op (as if hookJava silently found no Java bridge -- see agent.js's
+    hookJava guard) and run() never fires any pssh/license_url/headers
+    message, so the CaptureCollector never becomes ready."""
+
+    def __init__(self, agent_source, device_name=None):
+        pass
+
+    def on(self, kind, handler):
+        pass
+
+    def attach_app(self, package, invoke=None, spawn=True):
+        pass
+
+    def run(self, timeout=None, until=None):
+        pass
+
+
+def test_run_capture_returns_cleanly_when_never_ready(tmp_path, monkeypatch):
+    """Reproduces the live-integration finding: on Frida 17 without the Java
+    bridge bundled, hookJava can't hook anything, so the capture never
+    completes. run_capture must not raise IncompleteIdentity in that case --
+    it should log and return None without writing capture.json."""
+    monkeypatch.setattr(pipeline, "WidevineSession", _FakeNeverReadySession)
+    out = tmp_path / "capture.json"
+
+    result = pipeline.run_capture(_FakeDevice(), "com.example.app", str(out))  # must not raise
+
+    assert result is None
+    assert not out.exists()

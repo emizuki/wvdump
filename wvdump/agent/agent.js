@@ -219,7 +219,16 @@ function hookNative() {
 // --- Java hooks ------------------------------------------------------------
 
 function hookJava() {
-    if (!Java.available) { emit("log", { message: "no Java runtime" }); return; }
+    // Frida 17 removed the `Java` bridge from a plain script's global scope
+    // -- it must be bundled via frida-compile (not done here), so `Java` is
+    // entirely undefined unless frida-java-bridge was injected some other
+    // way. Guard against that BEFORE touching `Java.available`, which would
+    // otherwise throw a ReferenceError that propagates out of this rpc
+    // export as an frida.RPCException and crashes the Python controller.
+    if (typeof Java === 'undefined' || !Java.available) {
+        emit("log", { message: "Java bridge unavailable (Frida 17 needs frida-java-bridge bundled) -- capture hooks not installed" });
+        return;
+    }
     Java.perform(function () {
         try {
             var MediaDrm = Java.use("android.media.MediaDrm");

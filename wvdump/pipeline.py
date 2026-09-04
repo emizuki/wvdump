@@ -10,12 +10,13 @@ import json
 from base64 import b64decode
 from pathlib import Path
 
+import frida
 from google.protobuf.message import DecodeError
 
 from wvdump.agent import AGENT_SOURCE
 from wvdump.capture import CaptureCollector, save_capture
 from wvdump.device import extract_client_id, save_wvd
-from wvdump.errors import IncompleteIdentity
+from wvdump.errors import FridaError, IncompleteIdentity
 from wvdump.keybox import parse_keybox
 from wvdump.keys import fetch_keys
 from wvdump.models import CaptureTemplate, ContentKey, DeviceIdentity
@@ -126,10 +127,17 @@ def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     return str(out)
 
 
-def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> CaptureTemplate:
+def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> CaptureTemplate | None:
     """Attach the agent's Java capture hooks inside `package`, collect a
     pssh + license URL + headers for up to `timeout` seconds (stopping
     early once complete), and save the resulting CaptureTemplate.
+
+    Returns None (without writing `out_path`) instead of raising if the
+    capture never completed -- e.g. the target process has no Java runtime,
+    the Frida Java bridge isn't available (Frida 17 needs frida-java-bridge
+    bundled, which this plain-script agent doesn't do -- see agent.js's
+    hookJava guard), or attaching/invoking hookJava itself failed. These are
+    expected, loggable outcomes on some apps/devices, not bugs.
     """
     collector = CaptureCollector()
 
@@ -140,10 +148,26 @@ def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> Capt
     for kind in ("pssh", "license_url", "license_headers"):
         session.on(kind, lambda payload, data: collector.feed(payload))
     session.on("log", on_log)
-    session.attach_app(package, invoke="hookJava")
-    session.run(timeout=timeout, until=lambda: collector.ready)
 
-    template = collector.template()  # raises IncompleteIdentity if still incomplete
+    try:
+        session.attach_app(package, invoke="hookJava")
+        session.run(timeout=timeout, until=lambda: collector.ready)
+    except (frida.RPCException, FridaError) as exc:
+        print(
+            f"[wvdump] capture attach/hook failed: {exc}; "
+            "no capture.json written -- see README Limitations"
+        )
+        return None
+
+    if not collector.ready:
+        print(
+            "capture incomplete: did not observe a full pssh + license URL + "
+            "headers within the timeout; no capture.json written -- see "
+            "README Limitations"
+        )
+        return None
+
+    template = collector.template()
     save_capture(template, out_path)
     return template
 
@@ -164,6 +188,11 @@ def run_auto(dev, package: str, out_dir: str) -> list[ContentKey]:
 
     capture_path = out / "capture.json"
     run_capture(dev, package, str(capture_path))
+    if not capture_path.exists():
+        raise IncompleteIdentity(
+            f"auto: capture step did not produce {capture_path}; "
+            "cannot fetch keys without a complete pssh/license URL/headers capture"
+        )
 
     keys_path = out / "keys.json"
     return run_keys(str(wvd_path), str(capture_path), str(keys_path))
