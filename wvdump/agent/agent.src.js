@@ -221,6 +221,71 @@ function hookNative() {
     });
 }
 
+// --- Provisioning-time plaintext RSA key capture ---------------------------
+//
+// On this software-L3 build the device RSA key handed to LoadDeviceRSAKey is
+// wrapped/encrypted and never passes through a public BoringSSL RSA call
+// during steady-state signing, so it cannot be imported. The *plaintext* DER
+// key is only materialized briefly, inside an obfuscated OEMCrypto function,
+// while a device certificate is being provisioned. This generalizes the
+// reference dumper's `polorucp` sniff (dumper/Helpers/script.js): instead of
+// matching one hard-coded obfuscated symbol name, hook every obfuscated-style
+// export (short lowercase names) plus the ordinal `_oeccNN` set, and on entry
+// scan their pointer arguments for a DER-encoded RSA private key
+// (SEQUENCE, 0x30 0x82, of RSA-2048-ish length). Verified live: the key
+// surfaces as `<fn>#arg5` during HandleProvisioningResponse.
+//
+// This must be installed BEFORE a fresh provision runs (the controller wipes
+// the cached credentials and restarts the HAL first). It is separate from
+// hookNative because sniffing every function's args is only worthwhile during
+// that one provisioning event.
+function scanForDerKey(p, where, seen) {
+    if (p.isNull()) return;
+    var head;
+    try { head = new Uint8Array(p.readByteArray(4)); } catch (e) { return; }
+    // DER SEQUENCE with a 2-byte long-form length (0x30 0x82 hi lo).
+    if (head[0] !== 0x30 || head[1] !== 0x82) return;
+    var length = (head[2] << 8 | head[3]) + 4; // whole structure incl. header
+    if (length < 600 || length > 4000) return;   // RSA-2048 private key ~1.2 KB
+    var key = p.toString() + ':' + length;
+    if (seen[key]) return; // one emit per distinct buffer
+    seen[key] = true;
+    var bytes;
+    try { bytes = p.readByteArray(length); } catch (e) { return; }
+    emit("device_rsa_key", { data: bytesToBase64(bytes), plaintext: true });
+    emit("log", { message: "captured plaintext RSA key at " + where + " len=" + length });
+}
+
+function hookProvisioningKey() {
+    var seen = {};
+    var libs = ["libwvhidl.so", "libwvdrmengine.so", "liboemcrypto.so", "libmediadrm.so"];
+    var exports = [];
+    libs.forEach(function (lib) {
+        var mod;
+        try { mod = Process.getModuleByName(lib); } catch (e) { return; }
+        mod.enumerateExports().forEach(function (e) { exports.push(e); });
+    });
+    var hooked = 0;
+    exports.forEach(function (exp) {
+        var name = exp.name;
+        // Obfuscated OEMCrypto helpers are short all-lowercase names; the
+        // ordinal set is `_oeccNN`. Everything else is skipped to keep the
+        // number of interceptors (and the per-call arg scan) bounded.
+        if (!/^[a-z]{4,12}$/.test(name) && !/^_oecc\d+$/.test(name)) return;
+        try {
+            Interceptor.attach(exp.address, {
+                onEnter: function (args) {
+                    for (var i = 0; i < 8; i++) {
+                        try { scanForDerKey(args[i], name + "#arg" + i, seen); } catch (e) { /* ignore */ }
+                    }
+                }
+            });
+            hooked++;
+        } catch (e) { /* skip un-hookable exports */ }
+    });
+    emit("log", { message: "provisioning key sniff installed on " + hooked + " functions" });
+}
+
 // --- Java hooks ------------------------------------------------------------
 
 // PSSH: android.media.MediaDrm.getKeyRequest exposes the init data the app
@@ -349,4 +414,8 @@ function hookJava() {
 
 // The controller decides which hook set to run per attached process; do not
 // auto-invoke either at load time.
-rpc.exports = { hookNative: hookNative, hookJava: hookJava };
+rpc.exports = {
+    hookNative: hookNative,
+    hookJava: hookJava,
+    hookProvisioningKey: hookProvisioningKey,
+};

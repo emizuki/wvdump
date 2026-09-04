@@ -25,10 +25,15 @@ def _cmd_device(args) -> int:
     from wvdump.pipeline import run_device
     dev = pick_device(args.serial)
     ensure_frida_server(dev)
+    # Provisioning needs a network round-trip plus playback, so give the
+    # reprovision flow a longer default window unless the operator set one.
+    timeout = args.timeout
+    if timeout is None:
+        timeout = 45.0 if args.reprovision else 10.0
     # run_device logs its own outcome (wrote device.wvd, or a fallback
     # message with the raw artifacts it saved instead); it never raises for
     # an incomplete/unusable capture.
-    run_device(dev, args.out, timeout=args.timeout)
+    run_device(dev, args.out, timeout=timeout, reprovision=args.reprovision)
     return 0
 
 
@@ -71,7 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
     device = sub.add_parser("device", help="capture device identity (.wvd, or keybox.json as fallback)")
     device.add_argument("--serial")
     device.add_argument("--out", default="out", help="output directory")
-    device.add_argument("--timeout", type=float, default=10.0, help="seconds to wait for identity hooks to fire")
+    device.add_argument("--timeout", type=float, default=None,
+                        help="seconds to wait for identity hooks to fire "
+                             "(default 10, or 45 with --reprovision)")
+    device.add_argument("--reprovision", action="store_true",
+                        help="force a fresh Widevine provision to capture the plaintext "
+                             "device RSA key needed for a usable .wvd. Wipes cached "
+                             "Widevine credentials and restarts the DRM HAL (all apps "
+                             "re-provision automatically). Play protected content while "
+                             "this runs.")
     device.set_defaults(func=_cmd_device)
 
     capture = sub.add_parser("capture", help="capture a pssh + license-request template from an app")

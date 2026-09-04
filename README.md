@@ -68,6 +68,23 @@ uv run wvdump device --out out
 Trigger some DRM playback on the device while this runs so the native
 OEMCrypto hooks fire.
 
+On a **keybox-provisioned** device (the emulator below), the device RSA key
+seen during normal playback is wrapped and cannot be imported, so plain
+`device` falls back to raw artifacts. To get a **usable `.wvd`**, add
+`--reprovision`:
+
+```bash
+uv run wvdump device --reprovision --out out
+```
+
+This wipes the cached Widevine credentials and restarts the DRM HAL so the
+CDM provisions a fresh device certificate; the plaintext device RSA key is
+only exposed during that provisioning. **Play protected content while it
+runs** (e.g. the media3 demo against the public Widevine UAT test stream) so
+the CDM re-provisions and issues a license request. All apps re-provision
+automatically afterwards, so the effect is transient but disruptive — hence
+it is opt-in. See *Producing a usable `.wvd`* below.
+
 ### `capture`
 
 Attaches to a given app and records a PSSH + license-request template (URL,
@@ -116,27 +133,47 @@ On the environment above:
 - **`doctor`** — works: reports the device serial and ABI.
 - **`device`** — works: the native OEMCrypto hooks
   (`OEMCrypto_GetKeyData`, `OEMCrypto_LoadDeviceRSAKey`, `PrepareKeyRequest`)
-  fire during DRM playback, and `wvdump` saves the raw artifacts
-  (`license_request.bin`, `device_rsa_key.bin`, `device_token.bin`). On this
-  emulator a usable `device.wvd` is **not** produced, and `wvdump` degrades
-  gracefully by saving those raw artifacts instead — see Limitations below.
+  fire during DRM playback. Plain `device` sees only the wrapped RSA key and
+  saves raw artifacts.
+- **`device --reprovision`** — works: forcing a fresh provision captures the
+  **plaintext** device RSA key and a matching `ClientIdentification`, and
+  `wvdump` writes a real `device.wvd` (verified: a 2048-bit key, ~3 KB
+  `.wvd`).
+- **`keys`** — works: the produced `device.wvd`, replayed against the public
+  Widevine UAT test proxy for the wvmedia test stream, returned **8 content
+  keys** (`KID:key`). This is the full "identity + keys, on the emulator"
+  path.
 - **`capture`** — runs; the Java bridge now loads on Frida 17 (verified
   live), so `hookJava` installs the MediaDrm/HTTP hooks rather than no-opping.
   Whether it captures a full template depends on the target app — see
   Limitations below.
 
-## Limitations
+## Producing a usable `.wvd`
 
-**`.wvd` on keybox-provisioned devices.** This emulator provisions Widevine
-via a **keybox**, not an RSA device certificate. The device token it exposes
-is 72 bytes (not a full ≥128-byte keybox), and the RSA key returned by
-`LoadDeviceRSAKey` is the device's **wrapped/encrypted** key rather than an
-importable PEM/DER key, so `RSA.importKey` rejects it. Producing a usable
-`.wvd` therefore requires either a device that provisions a real RSA device
-certificate (typically a physical phone) or additional agent hooks — e.g.
-assembling a full keybox from `device_id` + `device_key` + `device_token`, or
-extracting the plaintext RSA key. On a keybox-only device, `wvdump` saves the
-raw captured artifacts instead of a `.wvd`.
+This emulator provisions Widevine via a **keybox** (system_id 7283, the public
+AOSP test keybox), not a baked-in RSA device certificate. During normal
+playback the RSA key handed to `LoadDeviceRSAKey` is the device's
+**wrapped/encrypted** key, which `RSA.importKey` rejects — so it never yields
+a `.wvd` on its own.
+
+The plaintext device RSA key is materialized only briefly, inside an
+obfuscated OEMCrypto function, **while a device certificate is being
+provisioned**. `wvdump device --reprovision` exploits this: it wipes the
+cached credentials, restarts the DRM HAL so the CDM re-provisions, and sniffs
+every obfuscated / ordinal OEMCrypto export's arguments for a DER-encoded
+RSA-2048 private key (`0x30 0x82 …`). On the tested emulator the key surfaced
+as `ncmqbmbc#arg5` during `HandleProvisioningResponse`; combined with the
+`ClientIdentification` from `PrepareKeyRequest` it produces a valid `.wvd`
+that fetches content keys. This generalizes the reference dumper's
+`polorucp` sniff instead of hard-coding one obfuscated symbol name.
+
+Caveats: the exact obfuscated function/argument is **build-specific** — the
+sniff scans broadly so it should adapt, but on a very different OEMCrypto
+build the plaintext may not surface this way (Google changed OEMCrypto on
+Android 11+). It also needs a rooted device (to wipe the credential store and
+restart the HAL) and a live playback to drive provisioning.
+
+## Limitations
 
 **`capture` and Frida 17's Java bridge.** Frida 17 no longer exposes the
 `Java` bridge in a plain agent script's global scope. This is handled by

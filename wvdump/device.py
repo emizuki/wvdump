@@ -79,6 +79,20 @@ def extract_client_id(request: bytes) -> bytes:
     )
 
 
+def normalize_private_key(key: bytes) -> bytes:
+    """Return the RSA private key as PEM, accepting either PEM or raw DER.
+
+    The provisioning-time capture yields a DER-encoded RSAPrivateKey, while
+    other paths (and pywidevine's own expectations) use PEM. Import via
+    pycryptodome -- which auto-detects PEM vs DER -- and re-export as PEM so
+    the rest of the pipeline has a single representation. Raises ValueError
+    (from RSA.import_key) if `key` is not an importable RSA key, e.g. the
+    wrapped/encrypted key handed to LoadDeviceRSAKey.
+    """
+    from Crypto.PublicKey import RSA
+    return RSA.import_key(key).export_key("PEM")
+
+
 def build_wvd(identity: DeviceIdentity) -> bytes:
     client_id = ClientIdentification()
     client_id.ParseFromString(identity.client_id)
@@ -86,7 +100,7 @@ def build_wvd(identity: DeviceIdentity) -> bytes:
         type_=DeviceTypes.ANDROID,
         security_level=3,
         flags=None,
-        private_key=identity.private_key,
+        private_key=normalize_private_key(identity.private_key),
         client_id=client_id.SerializeToString(),
     )
     return device.dumps()
