@@ -80,6 +80,7 @@ function hookGetKeyData(address, lib) {
         },
         onLeave: function (retvalue) {
             try {
+                if (retvalue.toInt32() !== 0) return; // only capture on OEMCrypto_SUCCESS
                 var length = Memory.readPointer(this.keyDataLength).toInt32();
                 var bytes = Memory.readByteArray(this.keyData, length);
                 emit("keybox", { data: bytesToBase64(bytes) });
@@ -100,6 +101,7 @@ function hookLoadDeviceRSAKey(address, lib) {
         },
         onLeave: function (retvalue) {
             try {
+                if (retvalue.toInt32() !== 0) return; // only capture on OEMCrypto_SUCCESS
                 var length = this.wrappedKeyLength.toInt32();
                 var bytes = Memory.readByteArray(this.wrappedKey, length);
                 emit("device_rsa_key", { data: bytesToBase64(bytes) });
