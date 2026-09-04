@@ -10,10 +10,16 @@ import json
 from base64 import b64decode
 from pathlib import Path
 
+from google.protobuf.message import DecodeError
+
+from wvdump.agent import AGENT_SOURCE
 from wvdump.capture import CaptureCollector, save_capture
+from wvdump.device import extract_client_id, save_wvd
 from wvdump.errors import IncompleteIdentity
+from wvdump.keybox import parse_keybox
 from wvdump.keys import fetch_keys
 from wvdump.models import CaptureTemplate, ContentKey, DeviceIdentity
+from wvdump.session import WidevineSession
 
 
 def run_keys(wvd_path: str, capture_path: str, out_path: str) -> list[ContentKey]:
@@ -32,16 +38,17 @@ def run_keys(wvd_path: str, capture_path: str, out_path: str) -> list[ContentKey
 
 def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     """Attach the agent's native identity hooks to every DRM HAL process on
-    `dev`, collect a device identity (or fall back to a raw keybox) for up
-    to `timeout` seconds, and save it under `out_dir`. Returns the path
-    written: `<out_dir>/device.wvd` on a full identity, or
-    `<out_dir>/keybox.json` if only a keybox arrived.
-    """
-    from wvdump.agent import AGENT_SOURCE
-    from wvdump.device import extract_client_id, save_wvd
-    from wvdump.keybox import parse_keybox
-    from wvdump.session import WidevineSession
+    `dev`, collect a device identity for up to `timeout` seconds, and save
+    it under `out_dir`.
 
+    This never raises for an incomplete/unusable capture -- Widevine L3
+    provisioning varies across devices (e.g. some only ever expose a wrapped,
+    non-importable RSA key -- the documented keybox-only case), and that is
+    an expected outcome, not a bug. On success, returns the `device.wvd`
+    path. Otherwise, it saves whatever raw buffers were captured (and a
+    parsed `keybox.json` if a full keybox arrived) under `out_dir`, logs an
+    actionable message, and returns `out_dir` itself.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     # NOTE: "client_id" here holds the raw buffer captured at PrepareKeyRequest,
@@ -72,25 +79,51 @@ def run_device(dev, out_dir: str, timeout: float = 10.0) -> str:
     session.run(timeout=timeout, until=lambda: state["client_id"] and state["rsa_key"])
 
     if state["client_id"] is not None:
-        # Saved unconditionally for debugging, even if extraction below fails.
+        # Saved unconditionally for debugging, even if extraction/build below fails.
         (out / "license_request.bin").write_bytes(state["client_id"])
 
     if state["client_id"] and state["rsa_key"]:
         try:
             client_id = extract_client_id(state["client_id"])
-        except IncompleteIdentity:
-            client_id = None
-        if client_id is not None:
             identity = DeviceIdentity(client_id=client_id, private_key=state["rsa_key"])
             path = save_wvd(identity, out / "device.wvd")
+            print(f"wrote {path}")
             return str(path)
+        except (ValueError, DecodeError, IncompleteIdentity) as exc:
+            # Do NOT attempt to decrypt/unwrap the key -- a wrapped RSA key
+            # (RSA.importKey raising ValueError) or an unrecoverable
+            # ClientIdentification are both expected outcomes on some
+            # devices. Fall through to the raw-artifact fallback below
+            # instead of crashing.
+            print(f"[wvdump] could not build a .wvd: {exc}")
 
+    if not any(state.values()):
+        print(
+            "No device identity signals were captured within the timeout "
+            "(no client_id, rsa_key, or keybox message arrived); nothing to save."
+        )
+        return str(out)
+
+    # Identity incomplete, or the .wvd build above failed. Save whatever raw
+    # buffers were captured so the run isn't a total loss, and degrade
+    # gracefully instead of crashing.
+    if state["rsa_key"] is not None:
+        (out / "device_rsa_key.bin").write_bytes(state["rsa_key"])
     if state["keybox"] is not None:
-        keybox = parse_keybox(state["keybox"])
-        path = out / "keybox.json"
-        path.write_text(json.dumps(keybox.to_dict(), indent=2))
-        return str(path)
-    raise IncompleteIdentity("no device identity or keybox captured within timeout")
+        (out / "device_token.bin").write_bytes(state["keybox"])
+        if len(state["keybox"]) >= 128:
+            try:
+                keybox = parse_keybox(state["keybox"])
+                (out / "keybox.json").write_text(json.dumps(keybox.to_dict(), indent=2))
+            except ValueError:
+                pass  # captured buffer too short/malformed to be a full keybox
+
+    print(
+        "Could not build a .wvd on this device (RSA key not importable / "
+        "identity incomplete -- likely keybox-only provisioning). "
+        f"Saved raw artifacts to {out}/. See README 'Limitations'."
+    )
+    return str(out)
 
 
 def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> CaptureTemplate:
@@ -98,9 +131,6 @@ def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> Capt
     pssh + license URL + headers for up to `timeout` seconds (stopping
     early once complete), and save the resulting CaptureTemplate.
     """
-    from wvdump.agent import AGENT_SOURCE
-    from wvdump.session import WidevineSession
-
     collector = CaptureCollector()
 
     def on_log(payload, data):

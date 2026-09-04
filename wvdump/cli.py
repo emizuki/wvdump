@@ -25,8 +25,10 @@ def _cmd_device(args) -> int:
     from wvdump.pipeline import run_device
     dev = pick_device(args.serial)
     ensure_frida_server(dev)
-    path = run_device(dev, args.out, timeout=args.timeout)
-    print(f"wrote {path}")
+    # run_device logs its own outcome (wrote device.wvd, or a fallback
+    # message with the raw artifacts it saved instead); it never raises for
+    # an incomplete/unusable capture.
+    run_device(dev, args.out, timeout=args.timeout)
     return 0
 
 
