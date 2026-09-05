@@ -214,7 +214,7 @@ def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> Capt
         )
         return None
 
-    if collector.best_tier == "url":
+    if collector.best_tier == "url" or not collector.correlated:
         print(
             "[wvdump] warning: license POST only matched by URL heuristic "
             "(no body/length confirmation); the captured template may not be "
@@ -333,11 +333,13 @@ def run_capture_stream(dev, package: str, out_dir: str,
     for kind in ("pssh", "license_request"):
         session.on(kind, feed)
     session.on("log", on_log)
-    session.attach_app(package, invoke="hookJava")
-    session.run(timeout=timeout)
-    if worker is not None:
-        worker.stop()
-        worker.join(timeout=5)
+    try:
+        session.attach_app(package, invoke="hookJava")
+        session.run(timeout=timeout)
+    finally:
+        if worker is not None:
+            worker.stop()
+            worker.join(timeout=5)
     return collector.out_dir
 
 
@@ -347,9 +349,15 @@ def run_keys_many(wvd_path: str, captures_dir: str, out_path: str) -> list[Conte
     short-lived tokens are better served by `capture --stream --fetch-keys`."""
     wvd = Path(wvd_path).read_bytes()
     files = sorted(Path(captures_dir).glob("capture-*.json"))
+    if not files:
+        print(f"[wvdump] no capture-*.json files found in {captures_dir}")
     keys_by_kid: dict[str, ContentKey] = {}
     for f in files:
-        tmpl = CaptureTemplate.from_dict(json.loads(f.read_text()))
+        try:
+            tmpl = CaptureTemplate.from_dict(json.loads(f.read_text()))
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            print(f"[wvdump] skipping unreadable capture file {f}: {exc}")
+            continue
         for k in fetch_keys(wvd, tmpl):
             keys_by_kid.setdefault(k.kid, k)
     keys = list(keys_by_kid.values())
