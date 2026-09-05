@@ -4,11 +4,20 @@ import re
 import time
 
 import adbutils
+from adbutils.errors import AdbError
 
 from wvdump.errors import DeviceError
 
 _MEDIADRM_STORES = ("/data/vendor/mediadrm", "/data/mediadrm")
 _INIT_SVC_RE = re.compile(r"\[init\.svc\.([^\]]+)\]:\s*\[(\w+)\]")
+
+
+def shell_checked(dev: adbutils.AdbDevice, cmd: str) -> str:
+    """dev.shell() that turns transient transport errors into DeviceError."""
+    try:
+        return dev.shell(cmd)
+    except AdbError as exc:
+        raise DeviceError(f"device {dev.serial} went offline: {exc}") from exc
 
 
 def parse_abi(getprop_out: str) -> str:
@@ -31,15 +40,15 @@ def pick_device(serial: str | None = None) -> adbutils.AdbDevice:
 
 
 def device_abi(dev: adbutils.AdbDevice) -> str:
-    return parse_abi(dev.shell("getprop ro.product.cpu.abi"))
+    return parse_abi(shell_checked(dev, "getprop ro.product.cpu.abi"))
 
 
 def ensure_root(dev: adbutils.AdbDevice) -> None:
-    out = dev.shell("id")
+    out = shell_checked(dev, "id")
     if "uid=0" in out:
         return
     dev.root()  # adbutils restarts adbd as root
-    out = dev.shell("id")
+    out = shell_checked(dev, "id")
     if "uid=0" not in out:
         raise DeviceError("adb root denied; device is not rootable")
 

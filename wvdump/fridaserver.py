@@ -5,9 +5,8 @@ import time
 from pathlib import Path
 
 import httpx
-from adbutils.errors import AdbError
 
-from wvdump.errors import DeviceError, FridaError
+from wvdump.errors import FridaError
 
 _ARCH = {"arm64-v8a": "arm64", "armeabi-v7a": "arm", "x86_64": "x86_64", "x86": "x86"}
 _REMOTE = "/data/local/tmp/frida-server-wvdump"
@@ -44,10 +43,8 @@ def _download(version: str, abi: str, cache: Path) -> Path:
 
 
 def _server_running(dev) -> bool:
-    try:
-        return "frida-server" in dev.shell("ps -A")
-    except AdbError as exc:
-        raise DeviceError(f"device {dev.serial} went offline: {exc}") from exc
+    from wvdump.adb import shell_checked
+    return "frida-server" in shell_checked(dev, "ps -A")
 
 
 def _start_server(dev, remote: str) -> None:
