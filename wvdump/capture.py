@@ -54,8 +54,10 @@ class CaptureCollector:
     def best_tier(self) -> str | None:
         if not self._candidates:
             return None
-        best = min(self._candidates, key=lambda c: (c[0], -c[4]))
-        return next(name for name, rank in TIER_ORDER.items() if rank == best[0])
+        best = min(enumerate(self._candidates),
+                   key=lambda p: (p[1][0], -p[1][4], -p[0]))
+        return next(name for name, rank in TIER_ORDER.items()
+                    if rank == best[1][0])
 
     @property
     def correlated(self) -> bool:
@@ -75,9 +77,9 @@ class CaptureCollector:
 
     def template(self) -> CaptureTemplate:
         if self._candidates:
-            _, pssh, url, headers, ts = min(
-                self._candidates, key=lambda c: (c[0], -c[4])
-            )
+            best = min(enumerate(self._candidates),
+                       key=lambda p: (p[1][0], -p[1][4], -p[0]))
+            _, pssh, url, headers, ts = best[1]
             return CaptureTemplate(pssh=pssh, url=url, headers=headers)
         if (self._pssh is not None and self._loose_url is not None
                 and self._loose_headers is not None):

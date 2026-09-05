@@ -38,6 +38,17 @@ def test_collector_template_prefers_most_recent_within_tier():
     assert c.template().url == "https://new.example/license"
 
 
+def test_collector_most_recent_wins_even_when_timestamps_tie(monkeypatch):
+    import wvdump.capture as capture_mod
+    monkeypatch.setattr(capture_mod.time, "time", lambda: 1000.0)  # constant clock
+    c = capture_mod.CaptureCollector()
+    c.feed({"kind": "pssh", "data": "AAAA"})
+    c.feed(_req("https://old.example/license", "body", pssh="AAAA"))
+    c.feed(_req("https://new.example/license", "body", pssh="AAAA"))
+    assert c.template().url == "https://new.example/license"
+    assert c.best_tier == "body"
+
+
 def test_collector_url_tier_uses_embedded_pssh_or_last_seen():
     c = CaptureCollector()
     c.feed({"kind": "pssh", "data": "LAST"})
