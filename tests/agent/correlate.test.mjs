@@ -78,3 +78,25 @@ test("prune drops stale entries", () => {
   assert.equal(queue.claimByLength(10), null);
   assert.equal(queue.size, 0);
 });
+
+test("lengthMatches coerces numeric strings and rejects garbage", () => {
+  assert.equal(lengthMatches("2884", 2163), true);
+  assert.equal(lengthMatches(undefined, 2163), false);
+  assert.equal(lengthMatches("abc", 2163), false);
+});
+
+test("push ignores malformed entries", () => {
+  const queue = new ChallengeQueue(30000, () => 1000);
+  queue.push({ len: 10, b64: "a", b64url: "a", pssh: "NO-U8" });
+  queue.push({ u8: new Uint8Array(4), b64: "b", b64url: "b", pssh: "NO-LEN" });
+  queue.push({ u8: new Uint8Array(4), len: 4, b64: "c", b64url: "c", pssh: "OK" });
+  assert.equal(queue.size, 1);
+  assert.equal(queue.claimByBody(new Uint8Array(4), "c").pssh, "OK");
+});
+
+test("claimByBody returns null when nothing matches", () => {
+  const queue = new ChallengeQueue(30000, () => 1000);
+  queue.push({ u8: new Uint8Array([1, 2, 3]), len: 3, b64: "AQID", b64url: "AQID", pssh: "P" });
+  assert.equal(queue.claimByBody(new Uint8Array([9, 9, 9]), "CQkJ"), null);
+  assert.equal(queue.size, 1); // unmatched entry stays queued
+});

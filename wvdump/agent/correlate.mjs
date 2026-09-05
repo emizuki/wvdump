@@ -11,11 +11,13 @@ export function b64Len(n) {
 // raw or as base64 (standard or url-safe, possibly padding-stripped)?
 export function lengthMatches(contentLength, challengeLen) {
   if (contentLength === null || contentLength === undefined) return false;
+  const n = Number(contentLength);
+  if (!Number.isFinite(n)) return false;
   const b = b64Len(challengeLen);
-  return contentLength === challengeLen ||
-         contentLength === b ||
-         contentLength === b - 1 ||
-         contentLength === b - 2;
+  return n === challengeLen ||
+         n === b ||
+         n === b - 1 ||
+         n === b - 2;
 }
 
 export function bytesContain(hay, needle) {
@@ -39,7 +41,8 @@ export function latin1(u8) {
 }
 
 // Pending MediaDrm challenges, claimed by the first POST that matches.
-// Entry shape: { u8, len, b64, b64url, pssh, at }.
+// Entry shape: { u8, len, b64, b64url, pssh, at }. `at` is stamped by the
+// queue's clock, not caller-supplied.
 export class ChallengeQueue {
   constructor(maxAgeMs = 30000, now = Date.now) {
     this._entries = [];
@@ -50,7 +53,7 @@ export class ChallengeQueue {
   get size() { return this._entries.length; }
 
   push(entry) {
-    if (!entry || !entry.len) return;
+    if (!entry || !entry.len || !(entry.u8 instanceof Uint8Array)) return;
     this.prune();
     this._entries.push({ ...entry, at: this._now() });
   }
@@ -63,11 +66,12 @@ export class ChallengeQueue {
   // Tier 1: the POST body equals/embeds a challenge (raw or base64 text).
   claimByBody(bodyU8, bodyB64) {
     this.prune();
-    const text = latin1(bodyU8);
+    let text = null;
     for (let i = 0; i < this._entries.length; i++) {
       const e = this._entries[i];
       if (bodyB64 === e.b64) return this._remove(i);
       if (bytesContain(bodyU8, e.u8)) return this._remove(i);
+      if (text === null) text = latin1(bodyU8);
       if (text.indexOf(e.b64) !== -1) return this._remove(i);
       if (text.indexOf(e.b64url) !== -1) return this._remove(i);
     }
