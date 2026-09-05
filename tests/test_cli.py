@@ -174,6 +174,16 @@ def test_device_out_dir_sanitizes_serial():
     assert cli._device_out_dir("out", "192.168.0.5:5555") == "out/192.168.0.5_5555"
 
 
+def test_capture_timeout_defaults_per_mode():
+    p = cli.build_parser()
+    a1 = p.parse_args(["capture", "--package", "com.x"])
+    assert a1.timeout is None
+    a2 = p.parse_args(["capture", "--package", "com.x", "--stream"])
+    assert a2.timeout is None
+    a3 = p.parse_args(["capture", "--package", "com.x", "--timeout", "42"])
+    assert a3.timeout == 42
+
+
 def test_parser_has_stream_and_captures_flags():
     p = cli.build_parser()
     args = p.parse_args(["capture", "--package", "com.x", "--stream",

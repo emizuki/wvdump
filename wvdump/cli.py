@@ -112,7 +112,8 @@ def _cmd_capture(args) -> int:
             print(f"wrote {keys_out}")
         return 0
     out = args.out or os.path.join(_device_out_dir("out", dev.serial), "capture.json")
-    result = run_capture(dev, args.package, out, timeout=args.timeout)
+    timeout = args.timeout if args.timeout is not None else 15.0
+    result = run_capture(dev, args.package, out, timeout=timeout)
     if result is not None:
         print(f"wrote {out}")
     return 0
@@ -157,7 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--serial")
     capture.add_argument("--out", default=None,
                          help="output capture template path (default: out/<serial>/capture.json)")
-    capture.add_argument("--timeout", type=float, default=15.0, help="seconds to wait for a complete capture")
+    capture.add_argument("--timeout", type=float, default=None,
+                         help="seconds to wait for a complete capture "
+                              "(default 15 for single capture, 1800 for --stream)")
     capture.add_argument("--stream", action="store_true",
                          help="capture every correlated license request until the timeout, "
                               "writing capture-<seq>.json under --out-dir")
