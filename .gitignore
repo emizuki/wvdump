@@ -5,3 +5,6 @@ out/
 *.wvd
 dist/
 node_modules/
+
+# superpowers isolated worktrees
+.worktrees/
