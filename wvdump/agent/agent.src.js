@@ -20,6 +20,7 @@
 //   OEMCrypto_LoadKeys             -> emit("log", ...)          (context only)
 //   PrepareKeyRequest              -> emit("device_client_id", ...)
 import Java from "frida-java-bridge";
+import { ChallengeQueue } from "./correlate.mjs";
 
 // --- Frida 17 compatibility shim -------------------------------------------
 // Frida 17+ removed the legacy Memory.read* helpers in favour of the
@@ -288,59 +289,24 @@ function hookProvisioningKey() {
 
 // --- Java hooks ------------------------------------------------------------
 
-// Base64 of the last few license challenges produced by MediaDrm, used to
-// correlate the outgoing HTTP POST that actually carries the license request
-// (so we record the real license-server URL/headers, not some unrelated
-// request that merely happened to fire around the same time).
-var _recentChallenges = [];
-function _rememberChallenge(u8) {
+// Pending MediaDrm challenges with the PSSH each was asked for. A license
+// POST claims the entry it carries, so each emitted license_request is
+// self-contained (pssh embedded) and the Python side never re-pairs by
+// ordering. Matching tiers, strongest first: body bytes > Content-Length >
+// license-looking URL (the last only while a challenge is pending, so
+// unrelated POSTs to the same endpoint are ignored once nothing is pending).
+var _pending = new ChallengeQueue(30000);
+
+function _rememberChallenge(u8, pssh) {
     if (!u8 || !u8.length) return;
     var b64 = bytesToBase64(u8);
-    _recentChallenges.push({
+    _pending.push({
         u8: u8,
-        b64: b64,                                                    // standard base64
+        len: u8.length,
+        b64: b64,                                                      // standard base64
         b64url: b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),  // url-safe, unpadded
+        pssh: pssh || null,
     });
-    if (_recentChallenges.length > 6) _recentChallenges.shift();
-}
-
-// Latin-1 view of a byte array, for substring searches against text bodies.
-function _latin1(u8) {
-    var s = '', CHUNK = 0x8000;
-    for (var i = 0; i < u8.length; i += CHUNK) {
-        s += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
-    }
-    return s;
-}
-
-// Does `hay` contain the byte subsequence `needle`?
-function _bytesContain(hay, needle) {
-    if (needle.length === 0 || needle.length > hay.length) return false;
-    var last = hay.length - needle.length;
-    for (var i = 0; i <= last; i++) {
-        var j = 0;
-        while (j < needle.length && hay[i + j] === needle[j]) j++;
-        if (j === needle.length) return true;
-    }
-    return false;
-}
-
-// A POST body "is" the license request if it equals a recent challenge, or
-// embeds it -- as raw bytes, or as base64 (standard or url-safe). The last
-// two matter because some apps wrap the challenge (base64) inside a
-// JSON request body rather than POSTing it raw.
-function _bodyCarriesChallenge(bodyU8) {
-    var bodyB64 = bytesToBase64(bodyU8);
-    var bodyText = null;
-    for (var i = 0; i < _recentChallenges.length; i++) {
-        var c = _recentChallenges[i];
-        if (bodyB64 === c.b64) return true;
-        if (_bytesContain(bodyU8, c.u8)) return true;
-        if (bodyText === null) bodyText = _latin1(bodyU8);
-        if (bodyText.indexOf(c.b64) !== -1) return true;
-        if (bodyText.indexOf(c.b64url) !== -1) return true;
-    }
-    return false;
 }
 
 // PSSH: android.media.MediaDrm.getKeyRequest exposes the init data the app
@@ -356,7 +322,8 @@ function hookMediaDrm() {
                 var req = this.getKeyRequest(scope, initData, mime, keyType, params);
                 try {
                     var data = req.getData();
-                    if (data !== null) _rememberChallenge(new Uint8Array(data));
+                    if (data !== null) _rememberChallenge(new Uint8Array(data),
+                                                          initData ? bytesToBase64(initData) : null);
                 } catch (e) { /* correlation just won't fire for this request */ }
                 try {
                     var durl = req.getDefaultUrl();
@@ -408,9 +375,15 @@ function _extractHeaders(request) {
     return out;
 }
 
-function _emitLicense(request, via) {
+function _emitLicense(request, headers, entry, via) {
     var url = "" + request.url().toString();
-    emit("license_request", { url: url, headers: _extractHeaders(request), matched: true, via: via });
+    emit("license_request", {
+        url: url,
+        headers: headers,
+        pssh: entry.pssh,
+        via: via,
+        matched: via !== "url",
+    });
     emit("log", { message: "correlated license POST (" + via + "): " + url });
 }
 
@@ -458,13 +431,18 @@ function _bufferBytes(buf) {
 }
 
 function _inspectRequest(request, Buffer) {
-    if (_recentChallenges.length === 0) return; // nothing to match yet
     if (("" + request.method()).toUpperCase() !== "POST") return;
     var body = request.body();
     if (body === null) return;
+    var headers = _extractHeaders(request);
+    var contentLength = null;
+    try {
+        var cl = headers["Content-Length"];
+        if (cl !== undefined) contentLength = parseInt(cl, 10);
+    } catch (e) { /* unknown length */ }
 
-    // (1) Definitive: the POST body carries the challenge. Read the body's
-    //     bytes by reflection (minification-proof), or via okio on
+    // (1) Definitive: the POST body carries a pending challenge. Read the
+    //     body's bytes by reflection (minification-proof), or via okio on
     //     un-minified builds. Works regardless of the license URL.
     var u8 = _bodyBytesByReflection(body);
     if (u8 === null && Buffer !== null) {
@@ -479,15 +457,26 @@ function _inspectRequest(request, Buffer) {
                     if (bb !== null) u8 = new Uint8Array(bb);
                 }
             }
-        } catch (e) { /* body unreadable -- fall through to the URL heuristic */ }
+        } catch (e) { /* body unreadable -- fall through */ }
     }
-    if (u8 !== null && _bodyCarriesChallenge(u8)) { _emitLicense(request, "body-match"); return; }
+    if (u8 !== null) {
+        var entry = _pending.claimByBody(u8, bytesToBase64(u8));
+        if (entry) { _emitLicense(request, headers, entry, "body"); return; }
+    }
 
-    // (2) Heuristic: the body wasn't readable (a hardened app with
-    //     R8-minified okhttp/okio), but a challenge is pending and this POST
-    //     goes to an unmistakable DRM license endpoint. That is the license
-    //     request; capture its URL + headers.
-    if (_looksLikeLicenseUrl("" + request.url().toString())) { _emitLicense(request, "url-heuristic"); return; }
+    // (2) Content-Length carries a pending challenge's raw or base64 size.
+    //     Works for hardened apps whose body can't be read at all.
+    var entryLen = _pending.claimByLength(contentLength);
+    if (entryLen) { _emitLicense(request, headers, entryLen, "length"); return; }
+
+    // (3) Heuristic: license-looking URL while a challenge is pending.
+    //     Claims the newest pending entry; without a pending challenge
+    //     nothing is emitted, so unrelated POSTs to the license endpoint
+    //     no longer flood the controller.
+    if (_looksLikeLicenseUrl("" + request.url().toString())) {
+        var entryUrl = _pending.claimByUrl(true);
+        if (entryUrl) _emitLicense(request, headers, entryUrl, "url");
+    }
 }
 
 // URL + headers, client 1: OkHttp. Request.Builder captures url + headers
