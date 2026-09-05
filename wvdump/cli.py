@@ -99,7 +99,7 @@ def _cmd_capture(args) -> int:
             def on_keys(keys):
                 for k in keys:
                     all_keys.append(k)
-                    print(f"{k.kid}:{k.key}")
+                    print(f"{k.kid}:{k.key}", flush=True)
         timeout = args.timeout if args.timeout is not None else 1800.0
         run_capture_stream(dev, args.package, out_dir, timeout=timeout,
                            wvd=wvd, on_keys=on_keys)
@@ -109,7 +109,7 @@ def _cmd_capture(args) -> int:
             keys_out.write_text(json.dumps(
                 [k.__dict__ for k in {k.kid: k for k in all_keys}.values()],
                 indent=2))
-            print(f"wrote {keys_out}")
+            print(f"wrote {keys_out}", flush=True)
         return 0
     out = args.out or os.path.join(_device_out_dir("out", dev.serial), "capture.json")
     timeout = args.timeout if args.timeout is not None else 15.0

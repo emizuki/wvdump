@@ -295,7 +295,7 @@ class KeyFetcherWorker:
                 if self._on_outcome is not None:
                     self._on_outcome(item.pssh, bool(keys))
             except Exception as exc:
-                print(f"[wvdump] replay failed for {item.url[:80]}: {exc}")
+                print(f"[wvdump] replay failed for {item.url[:80]}: {exc}", flush=True)
                 if self._on_outcome is not None:
                     self._on_outcome(item.pssh, False)
 
@@ -324,7 +324,7 @@ def run_capture_stream(dev, package: str, out_dir: str,
         fetch_keys_cb = worker.submit
 
     def on_log(payload, data):
-        print(f"[agent] {payload.get('message', '')}")
+        print(f"[agent] {payload.get('message', '')}", flush=True)
 
     def feed(payload, data):
         collector.feed(payload, on_pair=fetch_keys_cb)
@@ -338,7 +338,7 @@ def run_capture_stream(dev, package: str, out_dir: str,
             session.attach_app(package, invoke="hookJava")
             session.run(timeout=timeout)
         except (frida.RPCException, FridaError) as exc:
-            print(f"[wvdump] capture attach/hook failed: {exc}")
+            print(f"[wvdump] capture attach/hook failed: {exc}", flush=True)
             return collector.out_dir
     finally:
         if worker is not None:
