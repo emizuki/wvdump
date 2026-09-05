@@ -120,6 +120,47 @@ This was verified live against a heavily R8-minified commercial player
 the real DRM license endpoint plus its PSSH and auth headers, rather than the
 app's unrelated API calls.
 
+### `capture --stream` (multi-video)
+
+Record *every* correlated license request in one run, writing each as
+`capture-<seq>.json` (plus `capture-list.json`) under `--out-dir`:
+
+```bash
+uv run wvdump capture --package <PKG> --stream --out-dir out/<serial>/stream
+```
+
+Add `--fetch-keys --wvd out/<serial>/device.wvd` to replay each request
+**immediately** on a worker thread (the Frida message pump is never blocked,
+so fast playlist switching is not lost) and print `KID:key` per video:
+
+```bash
+uv run wvdump capture --package <PKG> --stream --fetch-keys \
+  --wvd out/<serial>/device.wvd
+```
+
+Replayed headers are sanitized first (httpx-managed headers like `Host`/
+`Content-Length` and values that are not valid HTTP field-values are dropped
+and logged). If a license response contains no CONTENT keys, the same PSSH is
+retried once with the next license POST that carries it.
+
+For apps whose tokens outlive the session, `keys` can batch-replay a saved
+stream instead:
+
+```bash
+uv run wvdump keys --wvd out/<serial>/device.wvd --captures out/<serial>/stream --out out/<serial>/keys.json
+```
+
+### Correlation tiers
+
+The agent pairs each license POST with the PSSH it was asked for and stamps
+how it was matched: `body` (POST bytes carry the MediaDrm challenge) >
+`length` (Content-Length equals the challenge's raw or base64 size) > `url`
+(license-looking URL while a challenge is pending). `capture` (single) only
+stops early on `body`/`length` matches; a `url`-only match is reported with a
+warning. `frida-server` startup is hardened: `nohup` launch, 30 s poll, a
+3 s survival check and one retry, with device transport errors reported as a
+clean `DeviceError`.
+
 ### `keys`
 
 Replays a license request against the license server using a previously
