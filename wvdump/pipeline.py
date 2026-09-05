@@ -7,6 +7,8 @@ one; they are covered by manual/live verification instead (see Task 12).
 """
 from __future__ import annotations
 import json
+import queue
+import threading
 from base64 import b64decode
 from pathlib import Path
 
@@ -212,12 +214,12 @@ def run_capture(dev, package: str, out_path: str, timeout: float = 15.0) -> Capt
         )
         return None
 
-    if not collector.correlated:
+    if collector.best_tier == "url":
         print(
-            "[wvdump] warning: could not correlate the license POST to the "
-            "MediaDrm challenge; falling back to the last-seen OkHttp URL, "
-            "which may not be the real license endpoint. Re-run and start "
-            "playback while attached, or supply --pssh/--url to `keys` directly."
+            "[wvdump] warning: license POST only matched by URL heuristic "
+            "(no body/length confirmation); the captured template may not be "
+            "the real license endpoint. Re-run and start playback while "
+            "attached, or supply --pssh/--url to `keys` directly."
         )
 
     template = collector.template()
@@ -249,3 +251,109 @@ def run_auto(dev, package: str, out_dir: str) -> list[ContentKey]:
 
     keys_path = out / "keys.json"
     return run_keys(str(wvd_path), str(capture_path), str(keys_path))
+
+
+class KeyFetcherWorker:
+    """Replays captured templates on a worker thread.
+
+    The Frida message pump must never block on a network round-trip (that
+    is what dropped messages during fast multi-video sessions), so the
+    message callback only enqueues; this worker owns all HTTP work.
+    """
+
+    def __init__(self, wvd: bytes, on_keys, on_outcome) -> None:
+        self._wvd = wvd
+        self._on_keys = on_keys
+        self._on_outcome = on_outcome
+        self._q: queue.Queue = queue.Queue()
+        self._seen_kids: set[str] = set()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit(self, template: CaptureTemplate) -> None:
+        self._q.put(template)
+
+    def stop(self) -> None:
+        self._q.put(None)
+
+    def join(self, timeout=None) -> None:
+        self._thread.join(timeout)
+
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            try:
+                keys = fetch_keys(self._wvd, item)
+                fresh = [k for k in keys if k.kid not in self._seen_kids]
+                self._seen_kids.update(k.kid for k in fresh)
+                if fresh:
+                    self._on_keys(fresh)
+                if self._on_outcome is not None:
+                    self._on_outcome(item.pssh, bool(keys))
+            except Exception as exc:
+                print(f"[wvdump] replay failed for {item.url[:80]}: {exc}")
+                if self._on_outcome is not None:
+                    self._on_outcome(item.pssh, False)
+
+
+def run_capture_stream(dev, package: str, out_dir: str,
+                       timeout: float = 1800.0,
+                       wvd: bytes | None = None,
+                       on_keys=None) -> Path:
+    """Attach the Java capture hooks and collect every correlated
+    (pssh, url, headers) pair until `timeout`. Each pair is written to
+    `capture-<seq>.json` as it arrives. When `wvd` is given, replay each
+    pair on the fly from a worker thread (never inside the Frida message
+    callback): `on_keys(fresh_keys)` runs per successful replay and the
+    outcomes feed the collector's retry logic."""
+    from wvdump.capture import StreamCollector
+    collector = StreamCollector(out_dir)
+    worker = None
+    fetch_keys_cb = None
+    if wvd is not None:
+        worker = KeyFetcherWorker(
+            wvd,
+            on_keys=on_keys or (lambda keys: None),
+            on_outcome=collector.mark_keys,
+        )
+        worker.start()
+        fetch_keys_cb = worker.submit
+
+    def on_log(payload, data):
+        print(f"[agent] {payload.get('message', '')}")
+
+    def feed(payload, data):
+        collector.feed(payload, on_pair=fetch_keys_cb)
+
+    session = WidevineSession(AGENT_SOURCE, device_name=getattr(dev, "serial", None))
+    for kind in ("pssh", "license_request"):
+        session.on(kind, feed)
+    session.on("log", on_log)
+    session.attach_app(package, invoke="hookJava")
+    session.run(timeout=timeout)
+    if worker is not None:
+        worker.stop()
+        worker.join(timeout=5)
+    return collector.out_dir
+
+
+def run_keys_many(wvd_path: str, captures_dir: str, out_path: str) -> list[ContentKey]:
+    """Batch-replay every capture-<seq>.json in `captures_dir` with the same
+    .wvd, deduping by KID. For apps whose tokens outlive the capture session;
+    short-lived tokens are better served by `capture --stream --fetch-keys`."""
+    wvd = Path(wvd_path).read_bytes()
+    files = sorted(Path(captures_dir).glob("capture-*.json"))
+    keys_by_kid: dict[str, ContentKey] = {}
+    for f in files:
+        tmpl = CaptureTemplate.from_dict(json.loads(f.read_text()))
+        for k in fetch_keys(wvd, tmpl):
+            keys_by_kid.setdefault(k.kid, k)
+    keys = list(keys_by_kid.values())
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps([k.__dict__ for k in keys], indent=2))
+    return keys
