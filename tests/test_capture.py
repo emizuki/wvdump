@@ -86,3 +86,54 @@ def test_collector_ignores_unrelated_kinds():
     c.feed({"kind": "keybox", "data": "..."})
     assert not c.ready
     assert not c.has_template
+
+
+import json
+
+from wvdump.capture import StreamCollector
+
+
+def _pair(url, pssh="P1", via="body"):
+    return {"kind": "license_request", "url": url, "via": via,
+            "pssh": pssh, "headers": {"H": "v"}}
+
+
+def test_stream_collector_saves_pairs_and_dedupes(tmp_path):
+    c = StreamCollector(str(tmp_path))
+    saved = []
+    c.feed(_pair("https://lic/1"), on_pair=lambda t: saved.append(t))
+    assert saved and saved[0].pssh == "P1"
+    assert (tmp_path / "capture-0001.json").exists()
+
+    # same pssh, new URL, replay already OK -> skip
+    c.mark_keys("P1", True)
+    c.feed(_pair("https://lic/2"), on_pair=lambda t: saved.append(t))
+    assert len(saved) == 1
+
+    # duplicate URL -> skip even without key status
+    c2 = StreamCollector(str(tmp_path / "d2"))
+    seen = []
+    c2.feed(_pair("https://lic/1"), on_pair=lambda t: seen.append(t))
+    c2.feed(_pair("https://lic/1"), on_pair=lambda t: seen.append(t))
+    assert len(seen) == 1
+
+
+def test_stream_collector_retries_once_when_replay_empty(tmp_path):
+    c = StreamCollector(str(tmp_path))
+    saved = []
+    c.feed(_pair("https://lic/1"), on_pair=lambda t: saved.append(t))
+    c.mark_keys("P1", False)                        # first replay returned no keys
+    c.feed(_pair("https://lic/2"), on_pair=lambda t: saved.append(t))
+    assert len(saved) == 2
+    c.mark_keys("P1", True)
+    c.feed(_pair("https://lic/3"), on_pair=lambda t: saved.append(t))
+    assert len(saved) == 2                          # no third attempt after success
+
+
+def test_stream_collector_writes_list_file(tmp_path):
+    c = StreamCollector(str(tmp_path))
+    c.feed(_pair("https://lic/1"))
+    c.feed(_pair("https://lic/2", pssh="P2"))
+    entries = json.loads((tmp_path / "capture-list.json").read_text())
+    assert len(entries) == 2
+    assert all((tmp_path / e).exists() for e in entries)
