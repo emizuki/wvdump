@@ -369,7 +369,7 @@ function _extractHeaders(request) {
     try {
         ("" + request.headers().toString()).split("\n").forEach(function (line) {
             var idx = line.indexOf(": ");
-            if (idx > 0) out[line.substring(0, idx)] = line.substring(idx + 2);
+            if (idx > 0) out[line.substring(0, idx).toLowerCase()] = line.substring(idx + 2);
         });
     } catch (e) { /* headers unreadable -- URL alone is still useful */ }
     return out;
@@ -382,6 +382,7 @@ function _emitLicense(request, headers, entry, via) {
         headers: headers,
         pssh: entry.pssh,
         via: via,
+        // matched is informational -- the Python side ranks by `via`, not `matched`.
         matched: via !== "url",
     });
     emit("log", { message: "correlated license POST (" + via + "): " + url });
@@ -437,7 +438,7 @@ function _inspectRequest(request, Buffer) {
     var headers = _extractHeaders(request);
     var contentLength = null;
     try {
-        var cl = headers["Content-Length"];
+        var cl = headers["content-length"];
         if (cl !== undefined) contentLength = parseInt(cl, 10);
     } catch (e) { /* unknown length */ }
 
@@ -464,10 +465,15 @@ function _inspectRequest(request, Buffer) {
         if (entry) { _emitLicense(request, headers, entry, "body"); return; }
     }
 
-    // (2) Content-Length carries a pending challenge's raw or base64 size.
-    //     Works for hardened apps whose body can't be read at all.
-    var entryLen = _pending.claimByLength(contentLength);
-    if (entryLen) { _emitLicense(request, headers, entryLen, "length"); return; }
+    // (2) When the body could not be read at all (hardened app), fall back
+    //     to Content-Length: it carries a pending challenge's raw or
+    //     base64 size. Only runs when u8 is null -- with a readable body
+    //     that didn't match, a coincidental length equality would be a
+    //     false positive.
+    if (u8 === null) {
+        var entryLen = _pending.claimByLength(contentLength);
+        if (entryLen) { _emitLicense(request, headers, entryLen, "length"); return; }
+    }
 
     // (3) Heuristic: license-looking URL while a challenge is pending.
     //     Claims the newest pending entry; without a pending challenge
