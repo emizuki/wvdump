@@ -5,8 +5,9 @@ import time
 from pathlib import Path
 
 import httpx
+from adbutils.errors import AdbError
 
-from wvdump.errors import FridaError
+from wvdump.errors import DeviceError, FridaError
 
 _ARCH = {"arm64-v8a": "arm64", "armeabi-v7a": "arm", "x86_64": "x86_64", "x86": "x86"}
 _REMOTE = "/data/local/tmp/frida-server-wvdump"
@@ -42,21 +43,36 @@ def _download(version: str, abi: str, cache: Path) -> Path:
     return binary
 
 
+def _server_running(dev) -> bool:
+    try:
+        return "frida-server" in dev.shell("ps -A")
+    except AdbError as exc:
+        raise DeviceError(f"device {dev.serial} went offline: {exc}") from exc
+
+
+def _start_server(dev, remote: str) -> None:
+    dev.shell(f"sh -c 'nohup {remote} >/dev/null 2>&1 < /dev/null &'")
+
+
 def ensure_frida_server(dev, version: str = "17.17.0") -> None:
     from wvdump.adb import device_abi, ensure_root
     ensure_root(dev)
     abi = device_abi(dev)
-    if "frida-server" in dev.shell("ps -A"):
+    if _server_running(dev):
         return
     local = _download(version, abi, Path.home() / ".cache" / "wvdump")
     dev.sync.push(str(local), _REMOTE)
     dev.shell(f"chmod 755 {_REMOTE}")
-    dev.shell(f"setsid {_REMOTE} >/dev/null 2>&1 < /dev/null &")
-    # Poll rather than waiting a single fixed interval: on a freshly booted
-    # emulator the server can take several seconds to come up under boot-time
-    # CPU contention, and a 2s wait spuriously reports "did not start".
-    for _ in range(20):
-        time.sleep(0.5)
-        if "frida-server" in dev.shell("ps -A"):
-            return
+    for _attempt in range(2):
+        _start_server(dev, _REMOTE)
+        # Poll up to 30 s (a freshly booted emulator can be slow), then
+        # require the server to STAY up for 3 more seconds -- a process that
+        # dies right after its launcher shell exits is not actually serving.
+        for _ in range(30):
+            time.sleep(1.0)
+            if _server_running(dev):
+                time.sleep(3.0)
+                if _server_running(dev):
+                    return
+                break
     raise FridaError("frida-server did not start")
