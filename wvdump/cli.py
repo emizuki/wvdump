@@ -113,6 +113,10 @@ def _cmd_capture(args) -> int:
         return 0
     out = args.out or os.path.join(_device_out_dir("out", dev.serial), "capture.json")
     timeout = args.timeout if args.timeout is not None else 15.0
+    # run_capture returns None (and writes nothing) when the capture never
+    # completed -- e.g. the Frida Java bridge is unavailable -- and already
+    # logs an actionable message in that case, so only claim success here
+    # when a file was actually written.
     result = run_capture(dev, args.package, out, timeout=timeout)
     if result is not None:
         print(f"wrote {out}")

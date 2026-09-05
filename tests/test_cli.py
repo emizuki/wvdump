@@ -138,6 +138,70 @@ def test_cmd_capture_reports_wrote_on_success(monkeypatch, capsys):
     assert "wrote out/capture.json" in capsys.readouterr().out
 
 
+def test_cmd_capture_resolves_timeout_defaults_per_mode(tmp_path, monkeypatch):
+    calls = {}
+
+    class FakeDev:
+        serial = "emulator-5554"
+
+    monkeypatch.setattr(adb, "pick_device", lambda serial=None: FakeDev())
+    monkeypatch.setattr(fridaserver, "ensure_frida_server", lambda dev: None)
+
+    def fake_run_capture(dev, package, out, timeout):
+        calls["single_timeout"] = timeout
+        return None
+
+    def fake_run_capture_stream(dev, package, out_dir, timeout, wvd, on_keys):
+        calls["stream_timeout"] = timeout
+        calls["stream_wvd"] = wvd
+        calls["stream_on_keys"] = on_keys
+
+    monkeypatch.setattr(pipeline, "run_capture", fake_run_capture)
+    monkeypatch.setattr(pipeline, "run_capture_stream", fake_run_capture_stream)
+
+    args = cli.build_parser().parse_args(["capture", "--package", "com.x"])
+    rc = cli.main(["capture", "--package", "com.x"])
+    assert rc == 0 and calls["single_timeout"] == 15.0
+
+    calls.clear()
+    rc = cli.main(["capture", "--package", "com.x", "--stream"])
+    assert rc == 0 and calls["stream_timeout"] == 1800.0 and calls["stream_wvd"] is None
+
+    calls.clear()
+    rc = cli.main(["capture", "--package", "com.x", "--stream", "--timeout", "42"])
+    assert rc == 0 and calls["stream_timeout"] == 42.0
+
+
+def test_cmd_capture_fetch_keys_requires_wvd(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(adb, "pick_device", lambda serial=None: _FakeDevice())
+    monkeypatch.setattr(fridaserver, "ensure_frida_server", lambda dev: None)
+    rc = cli.main(["capture", "--package", "com.x", "--stream", "--fetch-keys"])
+    assert rc == 2
+    assert "--fetch-keys requires --wvd" in capsys.readouterr().err
+
+
+def test_cmd_capture_stream_writes_deduped_keys(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(adb, "pick_device", lambda serial=None: _FakeDevice())
+    monkeypatch.setattr(fridaserver, "ensure_frida_server", lambda dev: None)
+    captured = {}
+
+    def fake_run_capture_stream(dev, package, out_dir, timeout, wvd, on_keys):
+        captured["out_dir"] = out_dir
+        captured["on_keys"] = on_keys
+        on_keys([ContentKey("aaaa", "0101", "CONTENT")])
+        on_keys([ContentKey("aaaa", "0101", "CONTENT"), ContentKey("bbbb", "0202", "CONTENT")])
+
+    monkeypatch.setattr(pipeline, "run_capture_stream", fake_run_capture_stream)
+    out_dir = tmp_path / "stream"
+    wvd = tmp_path / "device.wvd"; wvd.write_bytes(b"WVD")
+    rc = cli.main(["capture", "--package", "com.x", "--stream", "--fetch-keys",
+                   "--wvd", str(wvd), "--out-dir", str(out_dir)])
+    assert rc == 0
+    assert "aaaa:0101" in capsys.readouterr().out
+    keys = json.loads((out_dir / "keys.json").read_text())
+    assert len(keys) == 2
+
+
 def _keys_args(**kw) -> argparse.Namespace:
     base = dict(wvd="d.wvd", capture=None, captures=None, pssh=None, url=None,
                 header=None, out="out/keys.json")
