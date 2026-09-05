@@ -2,8 +2,33 @@
 from __future__ import annotations
 from typing import Callable
 
+import logging
+
 from wvdump.errors import LicenseServerError
 from wvdump.models import CaptureTemplate, ContentKey
+
+log = logging.getLogger("wvdump")
+
+# Headers httpx sets/manages itself; replaying captured values for them
+# breaks the request (wrong Host, stale Content-Length, ...).
+_MANAGED_HEADERS = {"host", "content-length", "connection",
+                    "accept-encoding", "transfer-encoding"}
+
+
+def sanitize_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Return `headers` minus values httpx manages itself and values that
+    are not valid RFC 7230 field-values (e.g. a masked '██' placeholder).
+    Each dropped entry is logged so the operator can see what was removed."""
+    out: dict[str, str] = {}
+    for k, v in (headers or {}).items():
+        if k.lower() in _MANAGED_HEADERS:
+            log.warning("dropping httpx-managed header %r", k)
+            continue
+        if any(ord(c) < 0x20 or ord(c) > 0x7e for c in v):
+            log.warning("dropping header %r with non-ASCII value", k)
+            continue
+        out[k] = v
+    return out
 
 
 def _default_cdm_factory(wvd: bytes):

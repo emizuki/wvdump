@@ -74,3 +74,25 @@ def test_fetch_keys_raises_on_non_200():
     with pytest.raises(LicenseServerError):
         fetch_keys(b"WVD", CaptureTemplate("AAAA", "https://lic", {}),
                    cdm_factory=lambda wvd: _FakeCdm(), http_post=fake_post)
+
+
+from wvdump.keys import sanitize_headers
+
+
+def test_sanitize_headers_drops_managed_and_non_ascii():
+    h = {
+        "Host": "www.example.com",
+        "Content-Length": "2163",
+        "Connection": "Keep-Alive",
+        "Accept-Encoding": "gzip",
+        "Transfer-Encoding": "chunked",
+        "Authorization": "Bearer \u2588\u2588",   # non-printable ASCII placeholder
+        "Content-Type": "application/octet-stream",
+        "X-Custom": "ok",
+    }
+    out = sanitize_headers(h)
+    assert out == {"Content-Type": "application/octet-stream", "X-Custom": "ok"}
+
+
+def test_sanitize_headers_passes_clean_values_through():
+    assert sanitize_headers({"X-A": "v", "X-B": "w"}) == {"X-A": "v", "X-B": "w"}
