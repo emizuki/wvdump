@@ -1,5 +1,6 @@
 """Command-line entry point for wvdump."""
 import argparse
+import json
 import os
 import re
 import sys
@@ -27,16 +28,18 @@ def _parse_headers(pairs: list[str]) -> dict[str, str]:
 
 
 def _cmd_keys(args) -> int:
-    from wvdump.pipeline import run_keys, run_keys_from_template
+    from wvdump.pipeline import run_keys, run_keys_from_template, run_keys_many
     from wvdump.models import CaptureTemplate
     if args.capture:
         keys = run_keys(args.wvd, args.capture, args.out)
+    elif args.captures:
+        keys = run_keys_many(args.wvd, args.captures, args.out)
     elif args.pssh and args.url:
         template = CaptureTemplate(pssh=args.pssh, url=args.url,
                                    headers=_parse_headers(args.header or []))
         keys = run_keys_from_template(args.wvd, template, args.out)
     else:
-        print("wvdump keys: provide --capture, or both --pssh and --url", file=sys.stderr)
+        print("wvdump keys: provide --capture, --captures, or both --pssh and --url", file=sys.stderr)
         return 2
     for k in keys:
         print(f"{k.kid}:{k.key}")
@@ -79,17 +82,37 @@ def _cmd_device(args) -> int:
 def _cmd_capture(args) -> int:
     from wvdump.adb import pick_device
     from wvdump.fridaserver import ensure_frida_server
-    from wvdump.pipeline import run_capture
+    from wvdump.pipeline import run_capture, run_capture_stream
     dev = pick_device(args.serial)
     ensure_frida_server(dev)
-    # Default the capture under the per-device output dir; an explicit --out
-    # is honored verbatim.
+    if args.stream:
+        from pathlib import Path
+        out_dir = args.out_dir or os.path.join(_device_out_dir("out", dev.serial), "stream")
+        all_keys = []
+        wvd = None
+        on_keys = None
+        if args.fetch_keys:
+            if not args.wvd:
+                print("wvdump capture: --fetch-keys requires --wvd", file=sys.stderr)
+                return 2
+            wvd = Path(args.wvd).read_bytes()
+            def on_keys(keys):
+                for k in keys:
+                    all_keys.append(k)
+                    print(f"{k.kid}:{k.key}")
+        timeout = args.timeout if args.timeout is not None else 1800.0
+        run_capture_stream(dev, args.package, out_dir, timeout=timeout,
+                           wvd=wvd, on_keys=on_keys)
+        if all_keys:
+            keys_out = Path(out_dir) / "keys.json"
+            keys_out.parent.mkdir(parents=True, exist_ok=True)
+            keys_out.write_text(json.dumps(
+                [k.__dict__ for k in {k.kid: k for k in all_keys}.values()],
+                indent=2))
+            print(f"wrote {keys_out}")
+        return 0
     out = args.out or os.path.join(_device_out_dir("out", dev.serial), "capture.json")
     result = run_capture(dev, args.package, out, timeout=args.timeout)
-    # run_capture returns None (and writes nothing) when the capture never
-    # completed -- e.g. the Frida Java bridge is unavailable -- and already
-    # logs an actionable message in that case, so only claim success here
-    # when a file was actually written.
     if result is not None:
         print(f"wrote {out}")
     return 0
@@ -135,11 +158,22 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--out", default=None,
                          help="output capture template path (default: out/<serial>/capture.json)")
     capture.add_argument("--timeout", type=float, default=15.0, help="seconds to wait for a complete capture")
+    capture.add_argument("--stream", action="store_true",
+                         help="capture every correlated license request until the timeout, "
+                              "writing capture-<seq>.json under --out-dir")
+    capture.add_argument("--out-dir", default=None,
+                         help="directory for --stream output (default: out/<serial>/stream)")
+    capture.add_argument("--fetch-keys", action="store_true",
+                         help="with --stream: replay each captured request immediately "
+                              "on a worker thread and print KID:key (requires --wvd)")
+    capture.add_argument("--wvd", default=None,
+                         help=".wvd device file used by --fetch-keys")
     capture.set_defaults(func=_cmd_capture)
 
     keys = sub.add_parser("keys", help="fetch content keys from a .wvd + a captured or supplied template")
     keys.add_argument("--wvd", required=True)
     keys.add_argument("--capture", help="captured template JSON (alternative to --pssh/--url)")
+    keys.add_argument("--captures", help="directory of capture-<seq>.json files (alternative to --capture/--pssh)")
     keys.add_argument("--pssh", help="base64 PSSH box (use with --url instead of --capture)")
     keys.add_argument("--url", help="license server URL (use with --pssh)")
     keys.add_argument("--header", action="append", metavar="K:V",

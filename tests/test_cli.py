@@ -107,7 +107,8 @@ def test_run_capture_returns_cleanly_when_never_ready(tmp_path, monkeypatch):
 
 def _capture_args() -> argparse.Namespace:
     return argparse.Namespace(
-        serial=None, package="com.example.app", out="out/capture.json", timeout=15.0
+        serial=None, package="com.example.app", out="out/capture.json",
+        timeout=15.0, stream=False, out_dir=None, fetch_keys=False, wvd=None,
     )
 
 
@@ -138,7 +139,8 @@ def test_cmd_capture_reports_wrote_on_success(monkeypatch, capsys):
 
 
 def _keys_args(**kw) -> argparse.Namespace:
-    base = dict(wvd="d.wvd", capture=None, pssh=None, url=None, header=None, out="out/keys.json")
+    base = dict(wvd="d.wvd", capture=None, captures=None, pssh=None, url=None,
+                header=None, out="out/keys.json")
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -170,3 +172,33 @@ def test_cmd_keys_requires_capture_or_pssh_url(capsys):
 def test_device_out_dir_sanitizes_serial():
     assert cli._device_out_dir("out", "emulator-5554") == "out/emulator-5554"
     assert cli._device_out_dir("out", "192.168.0.5:5555") == "out/192.168.0.5_5555"
+
+
+def test_parser_has_stream_and_captures_flags():
+    p = cli.build_parser()
+    args = p.parse_args(["capture", "--package", "com.x", "--stream",
+                         "--fetch-keys", "--wvd", "d.wvd",
+                         "--out-dir", "stream", "--timeout", "60"])
+    assert args.stream and args.fetch_keys
+    assert args.wvd == "d.wvd" and args.out_dir == "stream" and args.timeout == 60
+    args2 = p.parse_args(["keys", "--wvd", "d.wvd", "--captures", "stream",
+                          "--out", "keys.json"])
+    assert args2.captures == "stream"
+
+
+def test_keys_captures_writes_and_prints(tmp_path, monkeypatch, capsys):
+    wvd = tmp_path / "device.wvd"; wvd.write_bytes(b"WVD")
+    d = tmp_path / "stream"; d.mkdir()
+    (d / "capture-0001.json").write_text(json.dumps(
+        CaptureTemplate("AAAA", "https://lic", {}).to_dict()))
+
+    monkeypatch.setattr(
+        pipeline, "fetch_keys",
+        lambda wvd_bytes, tmpl: [ContentKey("eb67", "100b", "CONTENT")],
+    )
+    out = tmp_path / "keys.json"
+    rc = cli.main(["keys", "--wvd", str(wvd), "--captures", str(d),
+                   "--out", str(out)])
+    assert rc == 0
+    assert "eb67:100b" in capsys.readouterr().out
+    assert json.loads(out.read_text())[0]["kid"] == "eb67"
