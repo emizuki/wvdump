@@ -334,8 +334,12 @@ def run_capture_stream(dev, package: str, out_dir: str,
         session.on(kind, feed)
     session.on("log", on_log)
     try:
-        session.attach_app(package, invoke="hookJava")
-        session.run(timeout=timeout)
+        try:
+            session.attach_app(package, invoke="hookJava")
+            session.run(timeout=timeout)
+        except (frida.RPCException, FridaError) as exc:
+            print(f"[wvdump] capture attach/hook failed: {exc}")
+            return collector.out_dir
     finally:
         if worker is not None:
             worker.stop()
@@ -348,14 +352,14 @@ def run_keys_many(wvd_path: str, captures_dir: str, out_path: str) -> list[Conte
     .wvd, deduping by KID. For apps whose tokens outlive the capture session;
     short-lived tokens are better served by `capture --stream --fetch-keys`."""
     wvd = Path(wvd_path).read_bytes()
-    files = sorted(Path(captures_dir).glob("capture-*.json"))
+    files = sorted(Path(captures_dir).glob("capture-[0-9]*.json"))
     if not files:
         print(f"[wvdump] no capture-*.json files found in {captures_dir}")
     keys_by_kid: dict[str, ContentKey] = {}
     for f in files:
         try:
             tmpl = CaptureTemplate.from_dict(json.loads(f.read_text()))
-        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             print(f"[wvdump] skipping unreadable capture file {f}: {exc}")
             continue
         for k in fetch_keys(wvd, tmpl):

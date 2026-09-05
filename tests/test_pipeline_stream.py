@@ -87,6 +87,20 @@ def test_run_keys_many_dedupes_by_kid(tmp_path, monkeypatch):
     assert len(json.loads(out.read_text())) == 1
 
 
+def test_run_keys_many_ignores_capture_list_index_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "fetch_keys",
+        lambda wvd_bytes, tmpl: [ContentKey("eb67", "100b", "CONTENT")],
+    )
+    wvd = tmp_path / "device.wvd"; wvd.write_bytes(b"WVD")
+    d = tmp_path / "stream"; d.mkdir()
+    (d / "capture-list.json").write_text('["capture-0001.json"]')
+    (d / "capture-0001.json").write_text(json.dumps(
+        CaptureTemplate("AAAA", "https://lic", {}).to_dict()))
+    keys = pipeline.run_keys_many(str(wvd), str(d), str(tmp_path / "keys.json"))
+    assert keys == [ContentKey("eb67", "100b", "CONTENT")]
+
+
 def test_run_keys_many_skips_corrupt_files_and_reports_missing_dir(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         pipeline, "fetch_keys",
