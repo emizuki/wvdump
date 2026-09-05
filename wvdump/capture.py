@@ -1,4 +1,9 @@
-"""Correlate Java-layer agent messages into one license request template."""
+"""Correlate Java-layer agent messages into license request templates.
+
+CaptureCollector accumulates candidates into one license request template;
+StreamCollector saves every correlated (pssh, url, headers) pair for
+multi-video captures.
+"""
 from __future__ import annotations
 import json
 import threading
@@ -127,7 +132,7 @@ class StreamCollector:
         if msg.get("kind") != "license_request":
             return
         pssh = msg.get("pssh")
-        url = msg["url"]
+        url = msg.get("url")
         if pssh is None or url is None:
             return
         with self._lock:

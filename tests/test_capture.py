@@ -1,4 +1,6 @@
-from wvdump.capture import CaptureCollector
+import json
+
+from wvdump.capture import CaptureCollector, StreamCollector
 
 
 def _req(url, via, pssh=None, headers=None):
@@ -88,11 +90,6 @@ def test_collector_ignores_unrelated_kinds():
     assert not c.has_template
 
 
-import json
-
-from wvdump.capture import StreamCollector
-
-
 def _pair(url, pssh="P1", via="body"):
     return {"kind": "license_request", "url": url, "via": via,
             "pssh": pssh, "headers": {"H": "v"}}
@@ -128,6 +125,18 @@ def test_stream_collector_retries_once_when_replay_empty(tmp_path):
     c.mark_keys("P1", True)
     c.feed(_pair("https://lic/3"), on_pair=lambda t: saved.append(t))
     assert len(saved) == 2                          # no third attempt after success
+
+
+def test_stream_collector_caps_attempts_per_pssh_without_success(tmp_path):
+    c = StreamCollector(str(tmp_path))
+    saved = []
+    c.feed(_pair("https://lic/1"), on_pair=lambda t: saved.append(t))
+    c.mark_keys("P1", False)                        # attempt 1 failed (no keys)
+    c.feed(_pair("https://lic/2"), on_pair=lambda t: saved.append(t))
+    c.mark_keys("P1", False)                        # attempt 2 failed (no keys)
+    c.feed(_pair("https://lic/3"), on_pair=lambda t: saved.append(t))
+    assert len(saved) == 2                          # cap: no third attempt
+    assert not (tmp_path / "capture-0003.json").exists()
 
 
 def test_stream_collector_writes_list_file(tmp_path):
