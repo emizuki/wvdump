@@ -59,6 +59,10 @@ def fetch_keys(
             raise LicenseServerError(f"license server {resp.status_code}: {resp.text[:200]}")
         cdm.parse_license(session_id, resp.content)
         keys = []
+        # Only content-decryption keys are useful here. Whitelist CONTENT
+        # rather than merely excluding SIGNING, so operator/session and
+        # key-control entries (OPERATOR_SESSION, KEY_CONTROL, ...) don't
+        # leak into the output as if they were content keys.
         for k in cdm.get_keys(session_id):
             if getattr(k, "type", None) != "CONTENT":
                 continue
