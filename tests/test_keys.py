@@ -96,3 +96,38 @@ def test_sanitize_headers_drops_managed_and_non_ascii():
 
 def test_sanitize_headers_passes_clean_values_through():
     assert sanitize_headers({"X-A": "v", "X-B": "w"}) == {"X-A": "v", "X-B": "w"}
+
+
+def test_fetch_keys_sanitizes_headers_before_post():
+    posted = {}
+    def fake_post(url, headers, data):
+        posted.update(url=url, headers=headers, data=data)
+        class R:
+            status_code = 200
+            content = b"LICENSE_RESPONSE"
+            text = "ok"
+        return R()
+
+    tmpl = CaptureTemplate(
+        pssh="AAAA", url="https://lic",
+        headers={"Authorization": "Bearer \u2588\u2588", "Host": "www.example.com"},
+    )
+    fetch_keys(b"WVD", tmpl, cdm_factory=lambda wvd: _FakeCdm(), http_post=fake_post)
+    assert posted["headers"] == {}
+
+
+class _EmptyCdm(_FakeCdm):
+    def get_keys(self, session_id):
+        return []
+
+
+def test_fetch_keys_warns_on_empty_content_keys(caplog):
+    class R:
+        status_code = 200
+        content = b"LICENSE_RESPONSE"
+        text = "ok"
+    tmpl = CaptureTemplate("AAAA", "https://lic", {})
+    keys = fetch_keys(b"WVD", tmpl, cdm_factory=lambda wvd: _EmptyCdm(),
+                      http_post=lambda u, h, d: R())
+    assert keys == []
+    assert "no CONTENT keys" in caplog.text
